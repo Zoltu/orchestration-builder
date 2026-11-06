@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import type { QueueItemView } from '../executor/queue/model.js'
 import type { LogEvent, RunMeta } from '../executor/types.js'
-import { TASK_THREAD_MAX_ENTRIES, TASK_THREAD_MAX_LINEAGE_RUNS, isTaskThreadResponse } from './model.js'
-import type { TaskIdentity, TaskThreadEntry } from './model.js'
+import { buildThreadJournalFromLog, serializeThreadJournalCursorLine } from './journal.js'
+import { createThreadJournalStore } from './journal-store.js'
+import { TASK_THREAD_MAX_LINEAGE_RUNS, isTaskThreadResponse } from './model.js'
+import type { TaskIdentity, TaskThreadEntry, TaskThreadResponse } from './model.js'
 import { createTaskThreadCoreReader, createTaskThreadReader } from './reader.js'
-import { TASK_SUMMARY_FORMAT_VERSION } from './summary.js'
+import { TASK_SUMMARY_FORMAT_VERSION, threadFingerprint } from './summary.js'
 import type { TaskSummary } from './summary.js'
 import type { TaskThreadSummarySnapshot } from './summarizer.js'
 
@@ -32,8 +34,8 @@ function logLine(event: LogEvent): string {
 	return JSON.stringify(event)
 }
 
-function roleStart(task: string, timestamp = T0): LogEvent {
-	return { timestamp, type: 'role_start', payload: { role: 'main', roleId: 'main-0-1', depth: 0, task } }
+function roleStart(task: string, timestamp = T0, depth = 0): LogEvent {
+	return { timestamp, type: 'role_start', payload: { role: 'main', roleId: depth === 0 ? 'main-0-1' : 'child-1-2', depth, task } }
 }
 
 function roleFinished(timestamp: string, status: string, summary?: string): LogEvent {
@@ -55,52 +57,75 @@ function readySummary(runId: string, title = 'Ready title'): TaskSummary {
 	}
 }
 
+function logStatFor(logText: string, mtimeMs = 1): { size: number, mtimeMs: number } {
+	return { size: Buffer.byteLength(logText, 'utf8'), mtimeMs }
+}
+
+function journalFor(logText: string, mtimeMs = 1): string {
+	return buildThreadJournalFromLog(logText, logStatFor(logText, mtimeMs))
+}
+
 interface ReaderHarness {
-	reader: ReturnType<typeof createTaskThreadReader>
+	reader: (runId: string, request?: { limit?: number, before?: string }) => TaskThreadResponse | null
+	rawReader: ReturnType<typeof createTaskThreadReader>
 	core: ReturnType<typeof createTaskThreadCoreReader>
-	peekCalls: Array<{ runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[] }>
+	peekCalls: Array<{ runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[], fingerprint: string }>
 	logReads: Map<string, number>
-	logReadOffsets: Array<{ runId: string, offset: number }>
+	journalWrites: () => number
+	journals: Map<string, string>
 }
 
 function createHarness(options: {
 	metas?: Map<string, string>
 	logs?: Map<string, string>
+	journals?: Map<string, string>
 	queueItems?: readonly QueueItemView[]
-	peek?: (runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[]) => TaskThreadSummarySnapshot
+	peek?: (runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[], fingerprint: string) => TaskThreadSummarySnapshot
 } = {}): ReaderHarness {
 	const metas = options.metas ?? new Map<string, string>()
 	const logs = options.logs ?? new Map<string, string>()
+	const journals = options.journals ?? new Map<string, string>()
 	const queueItems = options.queueItems ?? []
-	const peekCalls: Array<{ runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[] }> = []
+	const peekCalls: Array<{ runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[], fingerprint: string }> = []
 	const logReads = new Map<string, number>()
-	const logReadOffsets: Array<{ runId: string, offset: number }> = []
+	const state = { journalWrites: 0 }
+	const store = createThreadJournalStore({
+		readThreadJournalText: (runId) => journals.get(runId) ?? null,
+		writeThreadJournalText: (runId, text) => {
+			journals.set(runId, text)
+			state.journalWrites++
+		},
+		appendThreadJournalCursor: (runId, logStat) => {
+			journals.set(runId, `${journals.get(runId) ?? ''}${serializeThreadJournalCursorLine(logStat)}`)
+		},
+		readLogText: (runId) => {
+			logReads.set(runId, (logReads.get(runId) ?? 0) + 1)
+			return logs.get(runId) ?? ''
+		},
+		readLogStat: (runId) => {
+			const text = logs.get(runId)
+			return text === undefined ? null : logStatFor(text)
+		},
+		readRunMetaText: (runId) => metas.get(runId) ?? null,
+	})
 	const core = createTaskThreadCoreReader({
 		readRunMetaTextById: (runId) => metas.get(runId) ?? null,
-		readRunLogTextFromById: (runId, offset) => {
-			logReads.set(runId, (logReads.get(runId) ?? 0) + 1)
-			logReadOffsets.push({ runId, offset })
-			const text = logs.get(runId) ?? ''
-			return Buffer.from(text, 'utf8').subarray(offset).toString('utf8')
-		},
-		readRunSnapshotStats: (runId) => {
-			const meta = metas.get(runId)
-			const log = logs.get(runId)
-			return {
-				meta: meta === undefined ? null : { size: meta.length, mtimeMs: 1 },
-				log: log === undefined || log === '' ? null : { size: log.length, mtimeMs: 1 },
-			}
-		},
+		readThreadJournal: (runId) => store.read(runId),
 		readQueueItems: () => queueItems,
 	})
-	const reader = createTaskThreadReader({
+	const rawReader = createTaskThreadReader({
 		readTaskThreadCore: core,
-		peekSummary: (runId, identity, entries) => {
-			peekCalls.push({ runId, identity, entries })
-			return options.peek === undefined ? { state: 'none', summary: null } : options.peek(runId, identity, entries)
+		peekSummary: (runId, identity, entries, fingerprint) => {
+			peekCalls.push({ runId, identity, entries, fingerprint })
+			return options.peek === undefined ? { state: 'none', summary: null } : options.peek(runId, identity, entries, fingerprint)
 		},
 	})
-	return { reader, core, peekCalls, logReads, logReadOffsets }
+	const reader = (runId: string, request?: { limit?: number, before?: string }): TaskThreadResponse | null => {
+		const result = rawReader(runId, request)
+		if (result === null || isTaskThreadResponse(result)) return result
+		throw new Error('unexpected invalid task-thread cursor')
+	}
+	return { reader, rawReader, core, peekCalls, logReads, journalWrites: () => state.journalWrites, journals }
 }
 
 describe('createTaskThreadReader', () => {
@@ -230,6 +255,8 @@ describe('createTaskThreadReader', () => {
 		expect(response.identity.lineage.truncatedReason).toBe('depth')
 		expect(response.identity.lineage.complete).toBe(false)
 		expect(response.truncated.lineage).toBe(true)
+		expect(response.truncated.entries).toBe(false)
+		expect(response.truncated.text).toBe(false)
 	})
 
 	test('passes through none, pending, ready, and failed summary states', () => {
@@ -262,16 +289,18 @@ describe('createTaskThreadReader', () => {
 		expect(question?.queueItemId).toBe('item-1')
 	})
 
-	test('bounds the response entries', () => {
-		const events: string[] = [logLine(roleStart('Fix the parser'))]
-		for (let index = 1; index <= TASK_THREAD_MAX_ENTRIES + 20; index++) {
-			events.push(logLine({ timestamp: `2026-01-01T00:00:${String(index % 60).padStart(2, '0')}.000Z`, type: 'plan_modification', payload: { message: `plan ${index}`, aborted: [] } }))
+	test('returns every journal entry without entry or text caps', () => {
+		const events: LogEvent[] = [roleStart('Fix the parser')]
+		for (let index = 1; index <= 320; index++) {
+			events.push({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index} ${'x'.repeat(5_000)}`, aborted: [] } })
 		}
-		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, events.join('\n')]]) })
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]) })
 		const response = harness.reader(RUN_A)
 		if (response === null) throw new Error('expected a response')
-		expect(response.entries.length).toBeLessThanOrEqual(TASK_THREAD_MAX_ENTRIES)
-		expect(response.truncated.entries).toBe(true)
+		expect(response.entries.length).toBeGreaterThan(300)
+		expect(response.entries.some((entry) => entry.text.length > 4_000)).toBe(true)
+		expect(response.truncated.entries).toBe(false)
+		expect(response.truncated.text).toBe(false)
 	})
 
 	test('does not expose log payloads, reasoning, tool data, child turns, or provider detail', () => {
@@ -293,62 +322,203 @@ describe('createTaskThreadReader', () => {
 		expect(serialized).not.toContain('child secret task')
 	})
 
-	test('caches parsed run sources and reads only the appended tail', () => {
-		const metas = new Map([[RUN_A, metaText(RUN_A)]])
-		const logs = new Map([[RUN_A, logLine(roleStart('Cached task'))]])
-		const harness = createHarness({ metas, logs })
-		expect(harness.reader(RUN_A)).not.toBeNull()
-		expect(harness.logReads.get(RUN_A)).toBe(1)
-		expect(harness.logReadOffsets).toEqual([{ runId: RUN_A, offset: 0 }])
-		expect(harness.reader(RUN_A)).not.toBeNull()
-		expect(harness.logReads.get(RUN_A)).toBe(1)
-		expect(harness.core(RUN_A)).not.toBeNull()
-		expect(harness.logReads.get(RUN_A)).toBe(1)
-		const original = logs.get(RUN_A) ?? ''
-		logs.set(RUN_A, [
-			original,
-			logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'new plan', aborted: [] } }),
-		].join('\n'))
-		const appended = harness.reader(RUN_A)
-		if (appended === null) throw new Error('expected appended response')
-		expect(harness.logReads.get(RUN_A)).toBe(2)
-		expect(harness.logReadOffsets[1]).toEqual({ runId: RUN_A, offset: Buffer.byteLength(original, 'utf8') })
-		expect(appended.entries.some((entry) => entry.text === 'new plan')).toBe(true)
+	test('does not read the audit log when the journal is current', () => {
+		const logText = `${[logLine(roleStart('Cached task')), logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'new plan', aborted: [] } })].join('\n')}\n`
+		const harness = createHarness({
+			metas: new Map([[RUN_A, metaText(RUN_A)]]),
+			logs: new Map([[RUN_A, logText]]),
+			journals: new Map([[RUN_A, journalFor(logText)]]),
+		})
+		const first = harness.reader(RUN_A)
+		if (first === null) throw new Error('expected a response')
+		const second = harness.reader(RUN_A)
+		if (second === null) throw new Error('expected a response')
+		expect(harness.logReads.get(RUN_A)).toBeUndefined()
+		expect(harness.journalWrites()).toBe(0)
+		expect(second.entries.some((entry) => entry.text === 'new plan')).toBe(true)
 	})
 
-	test('falls back to a full parse on log rewrite', () => {
-		const metas = new Map([[RUN_A, metaText(RUN_A)]])
-		const logs = new Map([[RUN_A, [logLine(roleStart('Original task')), logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'old plan', aborted: [] } })].join('\n')]])
-		const harness = createHarness({ metas, logs })
-		expect(harness.reader(RUN_A)).not.toBeNull()
-		logs.set(RUN_A, logLine(roleStart('Rewritten task')))
+	test('rebuilds an old run without a journal on first read and then uses the journal', () => {
+		const logText = `${[logLine(roleStart('Old task')), logLine({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: 'Which port?' } }), logLine({ timestamp: T1, type: 'human_answer', payload: { id: 'q1', answer: '8080' } })].join('\n')}\n`
+		const harness = createHarness({
+			metas: new Map([[RUN_A, metaText(RUN_A)]]),
+			logs: new Map([[RUN_A, logText]]),
+		})
+		const first = harness.reader(RUN_A)
+		if (first === null) throw new Error('expected a response')
+		expect(harness.logReads.get(RUN_A)).toBe(1)
+		expect(harness.journalWrites()).toBe(1)
+		expect(first.entries.some((entry) => entry.kind === 'question' && entry.text === 'Which port?')).toBe(true)
+		const second = harness.reader(RUN_A)
+		if (second === null) throw new Error('expected a response')
+		expect(harness.logReads.get(RUN_A)).toBe(1)
+		expect(harness.journalWrites()).toBe(1)
+	})
+
+	test('keeps an early question and answer surrounded by more than 200 child lifecycle events', () => {
+		const events: LogEvent[] = [roleStart('Big task')]
+		for (let index = 0; index < 110; index++) events.push({ timestamp: T0, type: 'role_start', payload: { role: 'child', roleId: `child-${index}`, depth: 1, task: `child ${index}` } })
+		events.push({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: 'Early question?' } })
+		events.push({ timestamp: T1, type: 'human_answer', payload: { id: 'q1', answer: 'Early answer' } })
+		for (let index = 0; index < 110; index++) events.push({ timestamp: T1, type: 'role_finished', payload: { role: 'child', roleId: `child-${index}`, depth: 1, status: 'success', summary: `child ${index}` } })
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]) })
 		const response = harness.reader(RUN_A)
-		if (response === null) throw new Error('expected rewritten response')
-		expect(harness.logReadOffsets[harness.logReadOffsets.length - 1]).toEqual({ runId: RUN_A, offset: 0 })
+		if (response === null) throw new Error('expected a response')
+		const question = response.entries.find((entry) => entry.kind === 'question')
+		const answer = response.entries.find((entry) => entry.kind === 'answer')
+		expect(question?.text).toBe('Early question?')
+		expect(answer?.text).toBe('Early answer')
+	})
+
+	test('preserves full question and answer text', () => {
+		const questionText = `Q ${'q'.repeat(6_000)}`
+		const answerText = `A ${'a'.repeat(6_000)}`
+		const logText = `${[logLine(roleStart('Full text')), logLine({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: questionText } }), logLine({ timestamp: T1, type: 'human_answer', payload: { id: 'q1', answer: answerText } })].join('\n')}\n`
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, logText]]) })
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		expect(response.entries.find((entry) => entry.kind === 'question')?.text).toBe(questionText)
+		expect(response.entries.find((entry) => entry.kind === 'answer')?.text).toBe(answerText)
+	})
+
+	test('rebuilds a stale journal when the log has grown', () => {
+		const original = `${[logLine(roleStart('Original task')), logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'old plan', aborted: [] } })].join('\n')}\n`
+		const rewritten = `${[logLine(roleStart('Rewritten task')), logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'new plan', aborted: [] } }), logLine({ timestamp: T1, type: 'plan_modification', payload: { message: 'newer plan', aborted: [] } })].join('\n')}\n`
+		const harness = createHarness({
+			metas: new Map([[RUN_A, metaText(RUN_A)]]),
+			logs: new Map([[RUN_A, rewritten]]),
+			journals: new Map([[RUN_A, journalFor(original)]]),
+		})
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		expect(response.entries.some((entry) => entry.text === 'new plan')).toBe(true)
 		expect(response.entries.some((entry) => entry.text === 'old plan')).toBe(false)
-	})
-
-	test('marks entries truncated when the relevant-event cache cap is hit', () => {
-		const events = [logLine(roleStart('Capped task'))]
-		for (let index = 1; index <= 30; index++) {
-			events.push(logLine({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index} ${'x'.repeat(10_000)}`, aborted: [] } }))
-		}
-		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, events.join('\n')]]) })
-		const response = harness.reader(RUN_A)
-		if (response === null) throw new Error('expected capped response')
-		expect(response.truncated.entries).toBe(true)
-		expect(response.identity.lineage.resumeCountComplete).toBe(false)
-		expect(response.entries.length).toBeLessThan(31)
+		expect(harness.logReads.get(RUN_A)).toBe(1)
 	})
 
 	test('derives a log-only task when the current meta is malformed', () => {
 		const harness = createHarness({
 			metas: new Map([[RUN_A, '{not json']]),
-			logs: new Map([[RUN_A, logLine(roleStart('Recovered task'))]]),
+			logs: new Map([[RUN_A, `${logLine(roleStart('Recovered task'))}\n`]]),
 		})
 		const response = harness.reader(RUN_A)
 		if (response === null) throw new Error('expected a response')
 		expect(response.identity.status).toBe('unknown')
 		expect(response.identity.currentTask?.text).toBe('Recovered task')
+	})
+
+	test('passes the complete journal entries to the summary peeker', () => {
+		const events: LogEvent[] = [roleStart('Summary task')]
+		for (let index = 0; index < 250; index++) {
+			events.push({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index}`, aborted: [] } })
+		}
+		events.push({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: 'last question' } })
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]) })
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		const peeked = harness.peekCalls[0]
+		if (peeked === undefined) throw new Error('expected a peek call')
+		expect(peeked.entries.length).toBe(response.entries.length)
+		expect(peeked.entries.some((entry) => entry.kind === 'question' && entry.text === 'last question')).toBe(true)
+	})
+
+	test('pages the response while the summary peeker sees the full thread and every page shares its fingerprint', () => {
+		const events: LogEvent[] = [roleStart('Paged task')]
+		for (let index = 0; index < 620; index++) {
+			events.push({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index}`, aborted: [] } })
+		}
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]) })
+		const newest = harness.reader(RUN_A, { limit: 100 })
+		if (newest === null) throw new Error('expected a response')
+		const core = harness.core(RUN_A)
+		if (core === null) throw new Error('expected core entries')
+		const peeked = harness.peekCalls[0]
+		if (peeked === undefined) throw new Error('expected a peek call')
+		const fullFingerprint = threadFingerprint(core.identity, core.entries)
+		expect(newest.entries.length).toBe(101)
+		expect(newest.entries[0]?.id).toBe(core.entries[0]?.id)
+		expect(peeked.entries.length).toBe(core.entries.length)
+		expect(peeked.entries.length).toBeGreaterThan(newest.entries.length)
+		expect(peeked.fingerprint).toBe(newest.threadFingerprint)
+		expect(newest.threadFingerprint).toBe(fullFingerprint)
+		expect(newest.pagination.hasMoreOlder).toBe(true)
+		const cursor = newest.pagination.nextCursor
+		if (cursor === null) throw new Error('expected an older cursor')
+		const older = harness.reader(RUN_A, { limit: 100, before: cursor })
+		if (older === null) throw new Error('expected an older response')
+		const olderPeeked = harness.peekCalls[1]
+		if (olderPeeked === undefined) throw new Error('expected an older peek call')
+		expect(olderPeeked.fingerprint).toBe(older.threadFingerprint)
+		expect(older.threadFingerprint).toBe(fullFingerprint)
+		expect(older.entries[0]?.id).toBe(core.entries[0]?.id)
+		expect(older.pagination.nextCursor).not.toBe(cursor)
+	})
+
+	test('returns an explicit invalid-cursor result for an unknown before id', () => {
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, logLine(roleStart('Cursor task'))]]) })
+		expect(harness.rawReader(RUN_A, { before: 'missing-entry' })).toEqual({ kind: 'invalid_cursor' })
+		expect(harness.peekCalls.length).toBe(0)
+	})
+
+	test('accepts the pinned initial task as a cursor and returns only the initial task', () => {
+		const events: LogEvent[] = [roleStart('Initial task')]
+		for (let index = 0; index < 5; index++) events.push({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index}`, aborted: [] } })
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]) })
+		const newest = harness.reader(RUN_A, { limit: 2 })
+		if (newest === null) throw new Error('expected a response')
+		const initial = newest.entries[0]
+		if (initial === undefined) throw new Error('expected an initial entry')
+		const initialPage = harness.reader(RUN_A, { limit: 2, before: initial.id })
+		if (initialPage === null) throw new Error('expected an initial page')
+		expect(initialPage.entries.map((entry) => entry.id)).toEqual([initial.id])
+		expect(initialPage.pagination).toEqual({ hasMoreOlder: false, nextCursor: null })
+	})
+
+	test('the page fingerprint equals the summary artifact fingerprint', () => {
+		const events: LogEvent[] = [roleStart('Artifact task')]
+		for (let index = 0; index < 20; index++) events.push({ timestamp: T1, type: 'plan_modification', payload: { message: `plan ${index}`, aborted: [] } })
+		const artifactFingerprints: string[] = []
+		const harness = createHarness({
+			metas: new Map([[RUN_A, metaText(RUN_A)]]),
+			logs: new Map([[RUN_A, `${events.map(logLine).join('\n')}\n`]]),
+			peek: (runId, _identity, _entries, fingerprint) => {
+				artifactFingerprints.push(fingerprint)
+				return { state: 'ready', summary: { ...readySummary(runId), fingerprint } }
+			},
+		})
+		const response = harness.reader(RUN_A, { limit: 5 })
+		if (response === null) throw new Error('expected a response')
+		expect(artifactFingerprints[0]).toBe(response.threadFingerprint)
+		expect(response.summary?.fingerprint).toBe(response.threadFingerprint)
+	})
+
+	test('reports an incomplete thread for a running run with a missing journal', () => {
+		const logText = `${logLine(roleStart('Running task'))}\n`
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A, { status: 'running' })]]), logs: new Map([[RUN_A, logText]]) })
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		expect(response.truncated.entries).toBe(true)
+		expect(response.identity.lineage.resumeCountComplete).toBe(false)
+		expect(harness.logReads.get(RUN_A)).toBeUndefined()
+	})
+
+	test('reports an incomplete thread for a running run with a corrupt journal', () => {
+		const logText = `${logLine(roleStart('Running task'))}\n`
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A, { status: 'running' })]]), logs: new Map([[RUN_A, logText]]), journals: new Map([[RUN_A, 'corrupt\n']]) })
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		expect(response.truncated.entries).toBe(true)
+		expect(response.identity.lineage.resumeCountComplete).toBe(false)
+		expect(harness.journalWrites()).toBe(0)
+		expect(harness.logReads.get(RUN_A)).toBeUndefined()
+	})
+
+	test('flags duplicate projected entry ids as truncated', () => {
+		const logText = `${[logLine(roleStart('Duplicate ids')), logLine({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: 'first?' } }), logLine({ timestamp: T1, type: 'ask_human', payload: { id: 'q1', question: 'second?' } })].join('\n')}\n`
+		const harness = createHarness({ metas: new Map([[RUN_A, metaText(RUN_A)]]), logs: new Map([[RUN_A, logText]]) })
+		const response = harness.reader(RUN_A)
+		if (response === null) throw new Error('expected a response')
+		expect(response.entries.filter((entry) => entry.kind === 'question').length).toBe(1)
+		expect(response.truncated.entries).toBe(true)
 	})
 })

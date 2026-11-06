@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+	applyTaskThreadLatestResponse,
+	applyTaskThreadOlderResponse,
 	applyTaskThreadSummarySnapshot,
 	isCurrentTaskThreadResponse,
 	isCurrentTaskThreadSummaryResponse,
@@ -7,6 +9,7 @@ import {
 	planTaskThreadSummary,
 	shouldApplyTaskThreadSummaryFailure,
 	shouldRefreshTaskThread,
+	shouldResetTaskThreadOlder,
 	shouldRetryTaskThread404,
 	taskThreadFingerprint,
 	taskThreadRefreshSignal,
@@ -43,7 +46,7 @@ function entry(overrides: Partial<TaskThreadEntry> = {}): TaskThreadEntry {
 }
 
 function thread(overrides: Partial<TaskThreadResponse> = {}): TaskThreadResponse {
-	return {
+	const base: TaskThreadResponse = {
 		formatVersion: 1,
 		runId: 'run-1',
 		identity: {
@@ -67,11 +70,14 @@ function thread(overrides: Partial<TaskThreadResponse> = {}): TaskThreadResponse
 			latestHumanEvent: null,
 		},
 		entries: [entry()],
+		pagination: { hasMoreOlder: false, nextCursor: null },
+		threadFingerprint: '',
 		summary: null,
 		summaryState: 'none',
 		truncated: { entries: false, text: false, lineage: false },
 		...overrides,
 	}
+	return { ...base, threadFingerprint: overrides.threadFingerprint ?? serverThreadFingerprint(base.identity, base.entries) }
 }
 
 function readySummaryFor(target: TaskThreadResponse): TaskSummary {
@@ -83,25 +89,130 @@ describe('task-thread urls', () => {
 		expect(taskThreadUrl('run/a b')).toBe('api/runs/run%2Fa%20b/thread')
 		expect(taskThreadSummaryUrl('run/a b')).toBe('api/runs/run%2Fa%20b/thread/summary')
 	})
+
+	test('adds the before cursor when paging older entries', () => {
+		expect(taskThreadUrl('run-1', 'entry/7')).toBe('api/runs/run-1/thread?before=entry%2F7')
+		expect(taskThreadUrl('run-1')).toBe('api/runs/run-1/thread')
+	})
 })
 
 describe('taskThreadFingerprint', () => {
-	test('is stable for equal content and changes when the thread changes', () => {
-		const original = thread()
-		expect(taskThreadFingerprint(original)).toBe(taskThreadFingerprint(thread()))
-		expect(taskThreadFingerprint(original)).not.toBe(taskThreadFingerprint(thread({ entries: [entry({ text: 'Fix the parser and add tests' })] })))
-		expect(taskThreadFingerprint(original)).toBe(serverThreadFingerprint(original.identity, original.entries))
+	test('uses the server-provided fingerprint instead of recomputing it from the page', () => {
+		const served = thread({ threadFingerprint: 'server-fingerprint' })
+		expect(taskThreadFingerprint(served)).toBe('server-fingerprint')
 	})
 
-	test('matches the server fingerprint for a fixture thread', () => {
+	test('matches the full-thread server fingerprint produced by the fixture', () => {
 		const fixture = thread()
 		expect(taskThreadFingerprint(fixture)).toBe(serverThreadFingerprint(fixture.identity, fixture.entries))
 	})
+})
 
-	test('ignores the optional per-run levels so cached summaries stay valid', () => {
-		const withoutRuns = thread()
-		const withRuns = thread({ runs: [{ runId: 'run-1', effort: 'thorough', involvement: 'collaborative' }] })
-		expect(taskThreadFingerprint(withRuns)).toBe(taskThreadFingerprint(withoutRuns))
+describe('task-thread pagination merge', () => {
+	test('merges contiguous pages by id in stable sequence order and lets the latest page win', () => {
+		const held = thread({
+			threadFingerprint: 'full-thread-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 })],
+		})
+		const latest = thread({
+			threadFingerprint: 'newer-thread-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0, text: 'initial updated' }), entry({ id: 'entry-3', sequence: 2 })],
+		})
+		expect(shouldResetTaskThreadOlder(held, latest, true)).toBe(false)
+		const merged = applyTaskThreadLatestResponse(held, latest, true)
+		expect(merged.entries.map((item) => item.id)).toEqual(['entry-1', 'entry-2', 'entry-3'])
+		expect(merged.entries[0]?.text).toBe('initial updated')
+	})
+
+	test('an older page keeps the newest identity, summary, fingerprint, and the older pagination', () => {
+		const held = thread({
+			runId: 'run-1',
+			threadFingerprint: 'full-thread-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-4', sequence: 3 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-4' },
+		})
+		const older = thread({
+			runId: 'run-1',
+			threadFingerprint: 'older-page-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 }), entry({ id: 'entry-3', sequence: 2 })],
+			pagination: { hasMoreOlder: false, nextCursor: null },
+			summaryState: 'pending',
+		})
+		const outcome = applyTaskThreadOlderResponse({ heldThread: held, body: older, runId: 'run-1', requestToken: 1, currentToken: 1, selectedRunId: 'run-1' })
+		expect(outcome.kind).toBe('merge')
+		if (outcome.kind !== 'merge') throw new Error('expected a merge outcome')
+		const merged = outcome.thread
+		expect(merged.entries.map((item) => item.sequence)).toEqual([0, 1, 2, 3])
+		expect(merged.entries.filter((item) => item.id === 'entry-1').length).toBe(1)
+		expect(merged.threadFingerprint).toBe('full-thread-fingerprint')
+		expect(merged.summaryState).toBe(held.summaryState)
+		expect(merged.pagination).toEqual({ hasMoreOlder: false, nextCursor: null })
+	})
+
+	test('a latest page preserves loaded older entries and the held older pagination when the ranges connect', () => {
+		const held = thread({
+			threadFingerprint: 'full-thread-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 }), entry({ id: 'entry-3', sequence: 2 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-2' },
+		})
+		const latest = thread({
+			threadFingerprint: 'newer-thread-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-4', sequence: 3 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-4' },
+			summaryState: 'pending',
+		})
+		expect(shouldResetTaskThreadOlder(held, latest, true)).toBe(false)
+		const merged = applyTaskThreadLatestResponse(held, latest, true)
+		expect(merged.entries.map((item) => item.sequence)).toEqual([0, 1, 2, 3])
+		expect(merged.threadFingerprint).toBe('newer-thread-fingerprint')
+		expect(merged.summaryState).toBe('pending')
+		expect(merged.pagination).toEqual(held.pagination)
+	})
+
+	test('a gap resets to the latest page when older pages were loaded but they still had more', () => {
+		const held = thread({
+			threadFingerprint: 'held-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 }), entry({ id: 'entry-3', sequence: 2 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-2' },
+		})
+		const latest = thread({
+			threadFingerprint: 'latest-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-600', sequence: 599 }), entry({ id: 'entry-601', sequence: 600 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-600' },
+		})
+		expect(shouldResetTaskThreadOlder(held, latest, true)).toBe(true)
+		const merged = applyTaskThreadLatestResponse(held, latest, true)
+		expect(merged).toBe(latest)
+		expect(merged.entries.map((item) => item.sequence)).toEqual([0, 599, 600])
+		expect(merged.pagination).toEqual({ hasMoreOlder: true, nextCursor: 'entry-600' })
+	})
+
+	test('a gap re-exposes the Load older control when the held range was fully loaded', () => {
+		const held = thread({
+			threadFingerprint: 'held-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-500', sequence: 499 })],
+			pagination: { hasMoreOlder: false, nextCursor: null },
+		})
+		const latest = thread({
+			threadFingerprint: 'latest-fingerprint',
+			entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-1000', sequence: 999 }), entry({ id: 'entry-1001', sequence: 1000 })],
+			pagination: { hasMoreOlder: true, nextCursor: 'entry-1000' },
+		})
+		expect(shouldResetTaskThreadOlder(held, latest, true)).toBe(true)
+		const merged = applyTaskThreadLatestResponse(held, latest, true)
+		expect(merged).toBe(latest)
+		expect(merged.pagination.hasMoreOlder).toBe(true)
+		expect(merged.pagination.nextCursor).toBe('entry-1000')
+	})
+
+	test('uses the latest response unchanged when no older page was loaded', () => {
+		const held = thread()
+		const latest = thread({ entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 })] })
+		expect(applyTaskThreadLatestResponse(held, latest, false)).toBe(latest)
+		expect(shouldResetTaskThreadOlder(held, latest, false)).toBe(false)
+		expect(applyTaskThreadLatestResponse(null, latest, true)).toBe(latest)
+		expect(shouldResetTaskThreadOlder(null, latest, true)).toBe(true)
+		expect(applyTaskThreadLatestResponse(held, latest, true).entries.length).toBe(2)
 	})
 })
 
@@ -161,6 +272,36 @@ describe('stale same-run responses', () => {
 		expect(isCurrentTaskThreadResponse({ requestToken: 1, currentToken: 2, runId: 'run-1', selectedRunId: 'run-1' })).toBe(false)
 		expect(isCurrentTaskThreadResponse({ requestToken: 2, currentToken: 2, runId: 'run-1', selectedRunId: 'run-1' })).toBe(true)
 		expect(isCurrentTaskThreadResponse({ requestToken: 2, currentToken: 2, runId: 'run-1', selectedRunId: 'run-2' })).toBe(false)
+	})
+
+	test('an older-page response is ignored when its token or run is stale', () => {
+		const olderToken = 4
+		expect(isCurrentTaskThreadResponse({ requestToken: 3, currentToken: olderToken, runId: 'run-1', selectedRunId: 'run-1' })).toBe(false)
+		expect(isCurrentTaskThreadResponse({ requestToken: olderToken, currentToken: olderToken, runId: 'run-1', selectedRunId: 'run-2' })).toBe(false)
+		expect(isCurrentTaskThreadResponse({ requestToken: olderToken, currentToken: olderToken, runId: 'run-1', selectedRunId: 'run-1' })).toBe(true)
+	})
+})
+
+describe('older-page responses', () => {
+	const held = thread({ entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-4', sequence: 3 })], pagination: { hasMoreOlder: true, nextCursor: 'entry-4' } })
+	const older = thread({ entries: [entry({ id: 'entry-1', sequence: 0 }), entry({ id: 'entry-2', sequence: 1 })], pagination: { hasMoreOlder: false, nextCursor: null } })
+
+	test('a stale token or changed run is ignored instead of merged', () => {
+		expect(applyTaskThreadOlderResponse({ heldThread: held, body: older, runId: 'run-1', requestToken: 1, currentToken: 2, selectedRunId: 'run-1' })).toEqual({ kind: 'ignored' })
+		expect(applyTaskThreadOlderResponse({ heldThread: held, body: older, runId: 'run-1', requestToken: 2, currentToken: 2, selectedRunId: 'run-2' })).toEqual({ kind: 'ignored' })
+	})
+
+	test('a rejected cursor response sets the older-load error instead of merging the newest page', () => {
+		expect(applyTaskThreadOlderResponse({ heldThread: held, body: { ok: false, error: 'invalid_cursor' }, runId: 'run-1', requestToken: 2, currentToken: 2, selectedRunId: 'run-1' })).toEqual({ kind: 'error' })
+		expect(applyTaskThreadOlderResponse({ heldThread: held, body: null, runId: 'run-1', requestToken: 2, currentToken: 2, selectedRunId: 'run-1' })).toEqual({ kind: 'error' })
+	})
+
+	test('a valid older page merges by id and adopts its pagination', () => {
+		const outcome = applyTaskThreadOlderResponse({ heldThread: held, body: older, runId: 'run-1', requestToken: 2, currentToken: 2, selectedRunId: 'run-1' })
+		expect(outcome.kind).toBe('merge')
+		if (outcome.kind !== 'merge') throw new Error('expected a merge outcome')
+		expect(outcome.thread.entries.map((item) => item.sequence)).toEqual([0, 1, 3])
+		expect(outcome.thread.pagination).toEqual({ hasMoreOlder: false, nextCursor: null })
 	})
 })
 

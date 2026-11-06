@@ -140,6 +140,8 @@ function thread(entries: TaskThreadEntry[], overrides: Partial<TaskThreadRespons
 			latestHumanEvent: null,
 		},
 		entries,
+		pagination: { hasMoreOlder: false, nextCursor: null },
+		threadFingerprint: 'fingerprint',
 		summary: null,
 		summaryState: 'none',
 		truncated: { entries: false, text: false, lineage: false },
@@ -304,6 +306,33 @@ describe('TaskHistoryDrawer', () => {
 		expect(retry === undefined ? null : retry.props.onclick).toBe('retry-summary')
 	})
 
+	test('shows a load-older control with idle, loading, and retry states', () => {
+		const renderMarkdown = markers([])
+		const paginated = thread([entry()], { pagination: { hasMoreOlder: true, nextCursor: 'entry-0' } })
+		const idle = renderDrawer({ thread: paginated, loadState: 'ready', renderMarkdown, onClose: 'close', onLoadOlder: 'load-older' })
+		const idleButton = allByTag(idle, 'button').find((button) => button.props.class === 'task-history-load-older')
+		expect(idleButton === undefined ? null : idleButton.props.onclick).toBe('load-older')
+		expect(idleButton === undefined ? null : idleButton.props.disabled).toBe(false)
+		expect(allText(idle)).toContain('Load older turns')
+
+		const loading = renderDrawer({ thread: paginated, loadState: 'ready', olderLoadState: 'loading', renderMarkdown, onClose: 'close', onLoadOlder: 'load-older' })
+		const loadingButton = allByTag(loading, 'button').find((button) => button.props.class === 'task-history-load-older')
+		expect(loadingButton === undefined ? null : loadingButton.props.disabled).toBe(true)
+		expect(loadingButton === undefined ? null : loadingButton.props['aria-busy']).toBe('true')
+		expect(allText(loading)).toContain('Loading older turns')
+
+		const failed = renderDrawer({ thread: paginated, loadState: 'ready', olderLoadState: 'error', renderMarkdown, onClose: 'close', onLoadOlder: 'load-older' })
+		const failedButton = allByTag(failed, 'button').find((button) => button.props.class === 'task-history-load-older task-history-load-older--error')
+		expect(failedButton === undefined ? null : failedButton.props.onclick).toBe('load-older')
+		expect(allText(failed)).toContain('Retry loading older turns')
+		expect(allText(failed)).toContain('Older turns could not be loaded.')
+	})
+
+	test('omits the load-older control when no older entries remain', () => {
+		const view = renderDrawer({ thread: thread([entry()]), loadState: 'ready', renderMarkdown: markers([]), onClose: 'close', onLoadOlder: 'load-older' })
+		expect(allByTag(view, 'button').some((button) => button.props.class === 'task-history-load-older')).toBe(false)
+	})
+
 	test('Close and the backdrop both invoke the close handler', () => {
 		const view = renderDrawer({
 			thread: thread([entry()]),
@@ -329,6 +358,8 @@ describe('createTaskHistoryDrawerRenderer', () => {
 		const nextThread = thread([entry({ text: 'changed' })])
 		expect(renderer.render(fakeH, { ...props, thread: nextThread })).not.toBe(first)
 		expect(renderer.render(fakeH, { ...props, summaryRequestPending: true })).not.toBe(first)
+		expect(renderer.render(fakeH, { ...props, olderLoadState: 'loading' })).not.toBe(first)
+		expect(renderer.render(fakeH, { ...props, onLoadOlder: 'load-older' })).not.toBe(first)
 	})
 
 	test('clear forces a fresh vnode for the same props', () => {

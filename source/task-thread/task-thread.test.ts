@@ -5,12 +5,8 @@ import {
 	TASK_IDENTITY_DESCRIPTION_MAX_CHARS,
 	TASK_IDENTITY_TITLE_MAX_CHARS,
 	TASK_THREAD_FORMAT_VERSION,
-	TASK_THREAD_MAX_ENTRIES,
-	TASK_THREAD_MAX_ENTRIES_PER_RUN,
-	TASK_THREAD_MAX_ENTRY_TEXT_CHARS,
 	TASK_THREAD_MAX_LATEST_HUMAN_CHIP_CHARS,
 	TASK_THREAD_MAX_LINEAGE_RUNS,
-	TASK_THREAD_MAX_TEXT_CHARS,
 	isTaskThreadEntry,
 	isTaskThreadResponse,
 } from './model.js'
@@ -35,9 +31,6 @@ const T7 = '2026-01-01T00:00:07.000Z'
 
 const OPTIONS: TaskThreadDerivationOptions = {
 	maxRuns: TASK_THREAD_MAX_LINEAGE_RUNS,
-	maxEntries: TASK_THREAD_MAX_ENTRIES,
-	maxEntriesPerRun: TASK_THREAD_MAX_ENTRIES_PER_RUN,
-	maxTextChars: TASK_THREAD_MAX_TEXT_CHARS,
 	maxLatestHumanChipChars: TASK_THREAD_MAX_LATEST_HUMAN_CHIP_CHARS,
 }
 
@@ -536,48 +529,20 @@ describe('lineage boundaries', () => {
 	})
 })
 
-describe('bounds and latest human event', () => {
-	test('keeps the initial task plus the newest entries under the global entry cap', () => {
-		const events: LogEvent[] = [roleStart(T0, 'task')]
-		for (let index = 1; index <= 6; index++) {
-			events.push(event('plan_modification', { message: `plan ${index}`, aborted: [] }, `2026-01-01T00:00:0${index}.000Z`))
-		}
-		const facts = factsFor(RUN_A, events)
-		const derived = deriveFrom(facts, [], { ...OPTIONS, maxEntries: 3 })
-		expect(derived.entries.length).toBe(3)
-		expect(derived.entries[0]?.kind).toBe('task')
-		expect(derived.entries.slice(1).map((entry) => entry.text)).toEqual(['plan 5', 'plan 6'])
-		expect(derived.truncated.entries).toBe(true)
-	})
-
-	test('caps entries per run', () => {
-		const events: LogEvent[] = [roleStart(T0, 'task')]
-		for (let index = 1; index <= 6; index++) {
-			events.push(event('plan_modification', { message: `plan ${index}`, aborted: [] }, `2026-01-01T00:00:0${index}.000Z`))
-		}
-		const facts = factsFor(RUN_A, events)
-		const derived = deriveFrom(facts, [], { ...OPTIONS, maxEntriesPerRun: 3 })
-		expect(derived.entries.length).toBe(3)
-		expect(derived.entries.map((entry) => entry.text)).toEqual(['fix the bug', 'plan 5', 'plan 6'])
-		expect(derived.truncated.entries).toBe(true)
-	})
-
-	test('caps total text and truncates overlong entry text', () => {
+describe('complete entries and latest human event', () => {
+	test('returns every entry without entry or text caps', () => {
 		const longText = 'word '.repeat(1000).trim()
-		const facts = factsFor(RUN_A, [
-			roleStart(T0, 'task'),
-			event('plan_modification', { message: longText, aborted: [] }, T1),
-			event('plan_modification', { message: longText, aborted: [] }, T2),
-		])
-		const derived = deriveFrom(facts, [], { ...OPTIONS, maxTextChars: 30 })
-		expect(derived.entries.length).toBe(1)
-		expect(derived.entries[0]?.text).toBe('fix the bug')
-		expect(derived.truncated.text).toBe(true)
-
-		const large = deriveFrom(facts, [], OPTIONS)
-		const largeEntry = defined(large.entries.find((entry) => entry.text.startsWith('word')), 'large entry')
-		expect(largeEntry.textTruncated).toBe(true)
-		expect(largeEntry.text.length).toBeLessThanOrEqual(TASK_THREAD_MAX_ENTRY_TEXT_CHARS)
+		const events: LogEvent[] = [roleStart(T0, 'task')]
+		for (let index = 1; index <= 6; index++) {
+			events.push(event('plan_modification', { message: `${longText} ${index}`, aborted: [] }, `2026-01-01T00:00:0${index}.000Z`))
+		}
+		const facts = factsFor(RUN_A, events)
+		const derived = deriveFrom(facts, [])
+		expect(derived.entries.length).toBe(8)
+		expect(derived.entries.filter((entry) => entry.text.startsWith('word')).every((entry) => entry.text.length === longText.length + 2)).toBe(true)
+		expect(derived.entries.some((entry) => entry.textTruncated)).toBe(false)
+		expect(derived.truncated.entries).toBe(false)
+		expect(derived.truncated.text).toBe(false)
 	})
 
 	test('latest human event skips later system and result entries and caps its chip text', () => {
@@ -592,25 +557,11 @@ describe('bounds and latest human event', () => {
 		expect(derived.latestHumanEvent?.kind).toBe('answer')
 		expect(derived.latestHumanEvent?.text.endsWith('…')).toBe(true)
 		expect(derived.latestHumanEvent?.text.length).toBeLessThanOrEqual(10)
-	})
-
-	test('keeps the true latest human turn even when truncation drops it from the entries', () => {
-		const events: LogEvent[] = [roleStart(T0, 'task'), ask(T1, 'q1', 'which?'), answer(T2, 'q1', 'the real latest human turn')]
-		for (let index = 3; index <= 8; index++) {
-			events.push(event('run_resumed', { runId: RUN_A, resumedFrames: 1 }, `2026-01-01T00:00:0${index}.000Z`))
-		}
-		const facts = factsFor(RUN_A, events)
-		const derived = deriveFrom(facts, [], { ...OPTIONS, maxEntries: 3 })
-		expect(derived.entries.some((entry) => entry.kind === 'answer')).toBe(false)
-		expect(derived.latestHumanEvent?.kind).toBe('answer')
-		expect(derived.latestHumanEvent?.text).toBe('the real latest human turn')
+		expect(derived.entries.some((entry) => entry.kind === 'answer' && entry.text === longAnswer)).toBe(true)
 	})
 
 	test('rejects invalid bounds', () => {
 		const facts = factsFor(RUN_A, [roleStart(T0, 'task')])
-		expect(() => deriveTaskThread(facts, lookupOf(facts), { ...OPTIONS, maxEntries: 0 })).toThrow()
-		expect(() => deriveTaskThread(facts, lookupOf(facts), { ...OPTIONS, maxEntriesPerRun: 0 })).toThrow()
-		expect(() => deriveTaskThread(facts, lookupOf(facts), { ...OPTIONS, maxTextChars: 0 })).toThrow()
 		expect(() => deriveTaskThread(facts, lookupOf(facts), { ...OPTIONS, maxLatestHumanChipChars: 0 })).toThrow()
 		expect(() => deriveTaskLineage(facts, lookupOf(facts), 0)).toThrow()
 	})
@@ -713,13 +664,13 @@ describe('identity', () => {
 		expect(deriveFrom(facts, []).identity.status).toBe('running')
 	})
 
-	test('bounds the current and original task text', () => {
+	test('preserves the full current and original task text', () => {
 		const longTask = 'word '.repeat(1000).trim()
 		const parent = factsFor(RUN_B, [roleStart(T0, 'parent')], { task: longTask })
 		const child = factsFor(RUN_A, [roleStart(T2, 'child')], { task: longTask, continuesFrom: RUN_B, startTime: T2 })
 		const derived = deriveFrom(child, [parent])
-		expect(derived.identity.currentTask?.text.length).toBeLessThanOrEqual(TASK_THREAD_MAX_ENTRY_TEXT_CHARS)
-		expect(derived.identity.originalTask?.text.length).toBeLessThanOrEqual(TASK_THREAD_MAX_ENTRY_TEXT_CHARS)
+		expect(derived.identity.currentTask?.text).toBe(longTask)
+		expect(derived.identity.originalTask?.text).toBe(longTask)
 	})
 })
 
@@ -732,6 +683,8 @@ describe('model guards', () => {
 			runId: RUN_A,
 			identity: derived.identity,
 			entries: derived.entries,
+			pagination: { hasMoreOlder: false, nextCursor: null },
+			threadFingerprint: 'fingerprint',
 			summary: null,
 			summaryState: 'none',
 			truncated: derived.truncated,
@@ -753,6 +706,20 @@ describe('model guards', () => {
 		expect(isTaskThreadResponse({ ...response, runs: 'not-an-array' })).toBe(false)
 		expect(isTaskThreadResponse({ ...response, runs: [{ effort: 'quick', involvement: null }] })).toBe(false)
 		expect(isTaskThreadResponse({ ...response, runs: [{ runId: '', effort: 'quick', involvement: null }] })).toBe(false)
+	})
+
+	test('requires a well-formed pagination envelope and a server fingerprint', () => {
+		const response = validResponse()
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: true, nextCursor: 'entry-1' } })).toBe(true)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: false, nextCursor: null } })).toBe(true)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: 'yes', nextCursor: null } })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: true, nextCursor: 5 } })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: true, nextCursor: '' } })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: true, nextCursor: null } })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, pagination: { hasMoreOlder: false, nextCursor: 'entry-1' } })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, pagination: undefined })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, threadFingerprint: '' })).toBe(false)
+		expect(isTaskThreadResponse({ ...response, threadFingerprint: undefined })).toBe(false)
 	})
 
 	test('rejects malformed entries and illegal field combinations', () => {

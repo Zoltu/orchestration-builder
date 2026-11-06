@@ -50,6 +50,8 @@ function thread(overrides: Partial<TaskThreadResponse> = {}): TaskThreadResponse
 			latestHumanEvent: null,
 		},
 		entries: [entry()],
+		pagination: { hasMoreOlder: false, nextCursor: null },
+		threadFingerprint: 'fingerprint',
 		summary: null,
 		summaryState: 'none',
 		truncated: { entries: false, text: false, lineage: false },
@@ -70,6 +72,19 @@ describe('task-thread wire guards', () => {
 		expect(isTaskThreadResponse({ ...thread(), runs: 'not-an-array' })).toBe(false)
 		expect(isTaskThreadResponse({ ...thread(), runs: [{ effort: 'quick', involvement: null }] })).toBe(false)
 		expect(isTaskThreadResponse({ ...thread(), runs: [{ runId: '', effort: 'quick', involvement: null }] })).toBe(false)
+	})
+
+	test('requires a well-formed pagination envelope and a server fingerprint', () => {
+		expect(isTaskThreadResponse(thread({ pagination: { hasMoreOlder: true, nextCursor: 'entry-1' } }))).toBe(true)
+		expect(isTaskThreadResponse(thread({ pagination: { hasMoreOlder: false, nextCursor: null } }))).toBe(true)
+		expect(isTaskThreadResponse({ ...thread(), pagination: { hasMoreOlder: 'yes', nextCursor: null } })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), pagination: { hasMoreOlder: true, nextCursor: 5 } })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), pagination: { hasMoreOlder: true, nextCursor: '' } })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), pagination: { hasMoreOlder: true, nextCursor: null } })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), pagination: { hasMoreOlder: false, nextCursor: 'entry-1' } })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), pagination: undefined })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), threadFingerprint: '' })).toBe(false)
+		expect(isTaskThreadResponse({ ...thread(), threadFingerprint: undefined })).toBe(false)
 	})
 
 	test('rejects an unknown format version, run id mismatch, or malformed summary state', () => {

@@ -4,7 +4,7 @@ import type { LooseH, Vnode, VnodeChildInput } from '../../vendor/hyperapp.js'
 import { effortDescription, effortLabel, involvementDescription, involvementLabel } from '../run-levels.js'
 import type { EffortLevel, InvolvementLevel } from '../run-levels.js'
 import type { TaskThreadEntry, TaskThreadResponse, TaskThreadRunInfo } from './wire.js'
-import type { TaskThreadLoadState } from './state.js'
+import type { TaskThreadLoadState, TaskThreadOlderLoadState } from './state.js'
 
 type RenderMarkdown = (text: string) => VnodeChildInput
 
@@ -22,10 +22,12 @@ export interface TaskHistoryRunGroup {
 export interface TaskHistoryDrawerProps {
 	thread: TaskThreadResponse | null
 	loadState: TaskThreadLoadState
+	olderLoadState?: TaskThreadOlderLoadState
 	renderMarkdown: RenderMarkdown
 	onClose: unknown
 	onRetryLoad?: unknown
 	onRetrySummary?: unknown
+	onLoadOlder?: unknown
 	summaryRequestPending?: boolean
 	summaryRequestFailed?: boolean
 }
@@ -144,6 +146,19 @@ function drawerStatus(h: LooseH, props: TaskHistoryDrawerProps): Vnode | null {
 	return null
 }
 
+function loadOlderControl(h: LooseH, props: TaskHistoryDrawerProps): Vnode | null {
+	const thread = props.thread
+	if (thread === null || !thread.pagination.hasMoreOlder) return null
+	const loading = props.olderLoadState === 'loading'
+	const failed = props.olderLoadState === 'error'
+	const label = loading ? 'Loading older turns\u2026' : failed ? 'Retry loading older turns' : 'Load older turns'
+	const children: Vnode[] = [
+		h('button', { type: 'button', class: `task-history-load-older${failed ? ' task-history-load-older--error' : ''}`, disabled: loading, 'aria-busy': loading ? 'true' : 'false', onclick: props.onLoadOlder }, label),
+	]
+	if (failed) children.push(h('span', { class: 'task-history-load-older-error', role: 'alert' }, 'Older turns could not be loaded.'))
+	return h('div', { class: 'task-history-older-control' }, children)
+}
+
 function drawerBody(h: LooseH, props: TaskHistoryDrawerProps): Vnode[] {
 	const thread = props.thread
 	if (thread === null) {
@@ -165,6 +180,8 @@ function drawerBody(h: LooseH, props: TaskHistoryDrawerProps): Vnode[] {
 	if (thread.truncated.entries) children.push(h('p', { class: 'task-history-notice' }, 'Older turns were omitted from this history.'))
 	if (thread.truncated.text) children.push(h('p', { class: 'task-history-notice' }, 'Some turn text was shortened.'))
 	if (thread.truncated.lineage) children.push(h('p', { class: 'task-history-notice task-history-notice--warning' }, 'The lineage is incomplete; some earlier runs may be missing.'))
+	const olderControl = loadOlderControl(h, props)
+	if (olderControl !== null) children.push(olderControl)
 	if (thread.entries.length === 0) {
 		children.push(h('p', { class: 'task-history-state' }, 'No task turns recorded yet.'))
 		return children
@@ -204,10 +221,12 @@ interface TaskHistoryDrawerCache {
 	h: LooseH
 	thread: TaskThreadResponse | null
 	loadState: TaskThreadLoadState
+	olderLoadState: TaskThreadOlderLoadState
 	renderMarkdown: RenderMarkdown
 	onClose: unknown
 	onRetryLoad: unknown
 	onRetrySummary: unknown
+	onLoadOlder: unknown
 	summaryRequestPending: boolean
 	summaryRequestFailed: boolean
 	vnode: Vnode
@@ -224,10 +243,12 @@ export function createTaskHistoryDrawerRenderer(): TaskHistoryDrawerRenderer {
 				&& cached.h === h
 				&& cached.thread === props.thread
 				&& cached.loadState === props.loadState
+				&& cached.olderLoadState === (props.olderLoadState === undefined ? 'idle' : props.olderLoadState)
 				&& cached.renderMarkdown === props.renderMarkdown
 				&& cached.onClose === props.onClose
 				&& cached.onRetryLoad === props.onRetryLoad
 				&& cached.onRetrySummary === props.onRetrySummary
+				&& cached.onLoadOlder === props.onLoadOlder
 				&& cached.summaryRequestPending === (props.summaryRequestPending === true)
 				&& cached.summaryRequestFailed === (props.summaryRequestFailed === true)) {
 				return cached.vnode
@@ -237,10 +258,12 @@ export function createTaskHistoryDrawerRenderer(): TaskHistoryDrawerRenderer {
 				h,
 				thread: props.thread,
 				loadState: props.loadState,
+				olderLoadState: props.olderLoadState === undefined ? 'idle' : props.olderLoadState,
 				renderMarkdown: props.renderMarkdown,
 				onClose: props.onClose,
 				onRetryLoad: props.onRetryLoad,
 				onRetrySummary: props.onRetrySummary,
+				onLoadOlder: props.onLoadOlder,
 				summaryRequestPending: props.summaryRequestPending === true,
 				summaryRequestFailed: props.summaryRequestFailed === true,
 				vnode,

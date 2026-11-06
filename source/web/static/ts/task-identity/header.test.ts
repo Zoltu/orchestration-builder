@@ -106,6 +106,8 @@ function thread(identityOverrides: Partial<TaskIdentity> = {}, overrides: Partia
 		runId: 'run-1',
 		identity: baseIdentity,
 		entries: [entry()],
+		pagination: { hasMoreOlder: false, nextCursor: null },
+		threadFingerprint: 'fingerprint',
 		summary: null,
 		summaryState: 'none',
 		truncated: { entries: false, text: false, lineage: false },

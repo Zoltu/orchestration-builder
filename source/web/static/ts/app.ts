@@ -27,8 +27,8 @@ import { deriveSuspendedCard, resumeFailureCopy, SuspendedCard, suspendedTermina
 import { diagnosticsResponseApplies, isRunDiagnostics, planSuspendedDiagnosticsOpen } from './run-diagnostics.js'
 import type { SuspendedDiagnosticsRecord } from './run-diagnostics.js'
 import { deriveHealthBanner, HealthBanner } from './health-banner.js'
-import { applyTaskThreadSummarySnapshot, createTaskHistoryDrawerRenderer, deriveTaskIdentityHeader, isCurrentTaskThreadResponse, isCurrentTaskThreadSummaryResponse, isTaskThreadResponse, isTaskThreadSummarySnapshot, nextTaskThreadSummaryAutoRetry, planTaskThreadSummary, shouldApplyTaskThreadSummaryFailure, shouldRefreshTaskThread, shouldRetryTaskThread404, TaskIdentityHeader, taskThreadFingerprint, taskThreadRefreshSignal, taskThreadSummaryIsForHeldThread, taskThreadSummaryMatches, taskThreadSummaryUrl, taskThreadUrl, TASK_THREAD_REFRESH_DEBOUNCE_MS, TASK_THREAD_SUMMARY_MAX_REFETCHES, TASK_THREAD_SUMMARY_REFETCH_DELAY_MS, TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS } from './task-identity/index.js'
-import type { TaskThreadLoadState, TaskThreadResponse } from './task-identity/index.js'
+import { applyTaskThreadLatestResponse, applyTaskThreadOlderResponse, applyTaskThreadSummarySnapshot, createTaskHistoryDrawerRenderer, deriveTaskIdentityHeader, isCurrentTaskThreadResponse, isCurrentTaskThreadSummaryResponse, isTaskThreadResponse, isTaskThreadSummarySnapshot, nextTaskThreadSummaryAutoRetry, planTaskThreadSummary, shouldApplyTaskThreadSummaryFailure, shouldRefreshTaskThread, shouldResetTaskThreadOlder, shouldRetryTaskThread404, TaskIdentityHeader, taskThreadFingerprint, taskThreadRefreshSignal, taskThreadSummaryIsForHeldThread, taskThreadSummaryMatches, taskThreadSummaryUrl, taskThreadUrl, TASK_THREAD_REFRESH_DEBOUNCE_MS, TASK_THREAD_SUMMARY_MAX_REFETCHES, TASK_THREAD_SUMMARY_REFETCH_DELAY_MS, TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS } from './task-identity/index.js'
+import type { TaskThreadLoadState, TaskThreadOlderLoadState, TaskThreadResponse } from './task-identity/index.js'
 import { topmostAppOverlay } from './overlay-priority.js'
 import { deriveHistoryEntries, lineageLink, queueItemLineageLink, runPrimaryLabel, runSummaryIndex } from './run-history.js'
 import type { LineageLink } from './run-history.js'
@@ -294,8 +294,11 @@ export interface ApplicationState {
 	// The selected run's task thread (GET /api/runs/:id/thread): the header's identity source and the drawer's content. The load state tracks the request without hiding a held thread; the trigger key dedupes summary POSTs for one thread snapshot.
 	taskThread: TaskThreadResponse | null
 	taskThreadLoad: TaskThreadLoadState
+	taskThreadOlderLoad: TaskThreadOlderLoadState
+	taskThreadOlderLoaded: boolean
 	taskThreadDrawerOpen: boolean
 	taskThreadRequestToken: number
+	taskThreadOlderRequestToken: number
 	taskThreadSignal: string | null
 	taskThreadRefreshScheduled: boolean
 	taskThreadTransientRetries: number
@@ -1705,8 +1708,11 @@ function resetRunView(state: ApplicationState, runId: string, status: RunStatus 
 		livePartial: null,
 		taskThread: null,
 		taskThreadLoad: 'idle',
+		taskThreadOlderLoad: 'idle',
+		taskThreadOlderLoaded: false,
 		taskThreadDrawerOpen: false,
 		taskThreadRequestToken: state.taskThreadRequestToken,
+		taskThreadOlderRequestToken: state.taskThreadOlderRequestToken + 1,
 		taskThreadSignal: null,
 		taskThreadRefreshScheduled: false,
 		taskThreadTransientRetries: 0,
@@ -1843,13 +1849,19 @@ function GotTaskThread(runId: string, requestToken: number) {
 			const pendingSummary = state.taskThreadSummaryPending || (state.taskThread !== null && state.taskThread.runId === runId && state.taskThread.summaryState === 'pending')
 			return { ...state, taskThreadLoad: 'error', taskThreadSummaryPending: false, taskThreadSummaryRequestFailed: state.taskThreadSummaryRequestFailed || pendingSummary }
 		}
+		const heldThread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+		const resetOlder = shouldResetTaskThreadOlder(heldThread, body, state.taskThreadOlderLoaded)
+		const nextThread = applyTaskThreadLatestResponse(heldThread, body, state.taskThreadOlderLoaded)
 		const nextState: ApplicationState = {
 			...state,
-			taskThread: body,
+			taskThread: nextThread,
 			taskThreadLoad: 'ready',
 			taskThreadTransientRetries: 0,
+			taskThreadOlderLoaded: state.taskThreadOlderLoaded && !resetOlder,
+			taskThreadOlderLoad: resetOlder ? 'idle' : state.taskThreadOlderLoad,
+			taskThreadOlderRequestToken: resetOlder ? state.taskThreadOlderRequestToken + 1 : state.taskThreadOlderRequestToken,
 		}
-		if (body.summaryState === 'failed') return taskThreadSummaryFailureResult(nextState, body, null, runId)
+		if (body.summaryState === 'failed') return taskThreadSummaryFailureResult(nextState, nextThread, null, runId)
 		if (body.summaryState === 'ready') {
 			return {
 				...nextState,
@@ -2032,6 +2044,56 @@ function TaskThreadFetchFailed(runId: string, requestToken: number) {
 		if (!isCurrentTaskThreadResponse({ requestToken, currentToken: state.taskThreadRequestToken, runId, selectedRunId: state.selectedRunId })) return state
 		const pendingSummary = state.taskThreadSummaryPending || (state.taskThread !== null && state.taskThread.runId === runId && state.taskThread.summaryState === 'pending')
 		return { ...state, taskThreadLoad: 'error', taskThreadSummaryPending: false, taskThreadSummaryRequestFailed: state.taskThreadSummaryRequestFailed || pendingSummary }
+	}
+}
+
+function FetchOlderTaskThread(runId: string, before: string) {
+	return function FetchOlderTaskThreadForRun(state: ApplicationState): ActionReturn {
+		if (state.selectedRunId !== runId) return state
+		if (state.taskThread === null || state.taskThread.runId !== runId) return state
+		if (state.taskThreadOlderLoad === 'loading') return state
+		const requestToken = state.taskThreadOlderRequestToken + 1
+		return [
+			{ ...state, taskThreadOlderLoad: 'loading', taskThreadOlderRequestToken: requestToken },
+			Fetch({ url: taskThreadUrl(runId, before), init: { cache: 'no-store' }, ok: GotOlderTaskThread(runId, requestToken), fail: TaskThreadOlderFetchFailed(runId, requestToken) }),
+		]
+	}
+}
+
+function LoadOlderTaskThread(state: ApplicationState): ActionReturn {
+	const runId = state.selectedRunId
+	if (runId === null || runId === '') return state
+	const thread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+	if (thread === null || !thread.pagination.hasMoreOlder || thread.pagination.nextCursor === null) return state
+	return FetchOlderTaskThread(runId, thread.pagination.nextCursor)(state)
+}
+
+function GotOlderTaskThread(runId: string, requestToken: number) {
+	return function GotOlderTaskThreadForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+		const heldThread = state.taskThread !== null && state.taskThread.runId === runId ? state.taskThread : null
+		const outcome = applyTaskThreadOlderResponse({
+			heldThread,
+			body: payload.ok ? payload.body : null,
+			runId,
+			requestToken,
+			currentToken: state.taskThreadOlderRequestToken,
+			selectedRunId: state.selectedRunId,
+		})
+		if (outcome.kind === 'ignored') return state
+		if (outcome.kind === 'error') return { ...state, taskThreadOlderLoad: 'error' }
+		return {
+			...state,
+			taskThread: outcome.thread,
+			taskThreadOlderLoad: 'idle',
+			taskThreadOlderLoaded: true,
+		}
+	}
+}
+
+function TaskThreadOlderFetchFailed(runId: string, requestToken: number) {
+	return function TaskThreadOlderFetchFailedForRun(state: ApplicationState): ApplicationState {
+		if (!isCurrentTaskThreadResponse({ requestToken, currentToken: state.taskThreadOlderRequestToken, runId, selectedRunId: state.selectedRunId })) return state
+		return { ...state, taskThreadOlderLoad: 'error' }
 	}
 }
 
@@ -3662,10 +3724,12 @@ function TaskHistoryDrawerForState(state: ApplicationState): Vnode | null {
 	return taskHistoryDrawerRenderer.render(h, {
 		thread,
 		loadState: state.taskThreadLoad,
+		olderLoadState: state.taskThreadOlderLoad,
 		renderMarkdown,
 		onClose: CloseTaskThreadDrawer,
 		onRetryLoad: RetryTaskThreadLoad,
 		onRetrySummary: RetryTaskThreadSummary,
+		onLoadOlder: LoadOlderTaskThread,
 		summaryRequestPending: state.taskThreadSummaryPending,
 		summaryRequestFailed: state.taskThreadSummaryRequestFailed,
 	})
@@ -4025,7 +4089,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 		'flowTier', 'flowViewMode', 'sequenceRolesOnly', 'screen', 'pageVisible', 'flowRefreshPending', 'expandedRowIds', 'continuation',
 		'resumingRunId', 'resumeSending', 'resumeNotice',
 		'questionPromptOpenKey', 'questionPromptSuppressedKeys', 'resultModalOpen', 'resultShownForRun', 'suspendedModalOpen', 'suspendedActionNotice', 'suspendedDiagnosticsOpen', 'suspendedDiagnosticsLoad', 'suspendedDiagnosticsRequestToken', 'resumeRunPendingId', 'pauseRequestPendingRunId', 'pauseRequestNotice', 'resultLoad', 'interruptModalOpen',
-		'inspectorModalOpen', 'planExpanded', 'taskThread', 'taskThreadLoad', 'taskThreadDrawerOpen', 'taskThreadRequestToken', 'taskThreadSignal', 'taskThreadRefreshScheduled', 'taskThreadTransientRetries', 'taskThreadSummaryRequestToken', 'taskThreadSummaryTriggerKey', 'taskThreadSummaryFailedKey', 'taskThreadSummaryRetryAt', 'taskThreadSummaryPendingKey', 'taskThreadSummaryRefetchCount', 'taskThreadSummaryPending', 'taskThreadSummaryRequestFailed', 'taskThreadSummaryAutoRetryKey', 'taskThreadSummaryAutoRetryCount', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
+		'inspectorModalOpen', 'planExpanded', 'taskThread', 'taskThreadLoad', 'taskThreadOlderLoad', 'taskThreadOlderLoaded', 'taskThreadDrawerOpen', 'taskThreadRequestToken', 'taskThreadOlderRequestToken', 'taskThreadSignal', 'taskThreadRefreshScheduled', 'taskThreadTransientRetries', 'taskThreadSummaryRequestToken', 'taskThreadSummaryTriggerKey', 'taskThreadSummaryFailedKey', 'taskThreadSummaryRetryAt', 'taskThreadSummaryPendingKey', 'taskThreadSummaryRefetchCount', 'taskThreadSummaryPending', 'taskThreadSummaryRequestFailed', 'taskThreadSummaryAutoRetryKey', 'taskThreadSummaryAutoRetryCount', 'livePartial', 'streamConnected', 'streamWasConnectedOnce', 'tooltip',
 		'interruptMode', 'interruptSending', 'interruptNotice', 'interruptAnswerCard', 'shownInterruptAnswerKeys', 'now',
 	]
 	return stateKeys.every((key) => key in value)
@@ -4107,8 +4171,11 @@ app({
 			planExpanded: false,
 			taskThread: null,
 			taskThreadLoad: 'idle',
+			taskThreadOlderLoad: 'idle',
+			taskThreadOlderLoaded: false,
 			taskThreadDrawerOpen: false,
 			taskThreadRequestToken: 0,
+			taskThreadOlderRequestToken: 0,
 			taskThreadSignal: null,
 			taskThreadRefreshScheduled: false,
 			taskThreadTransientRetries: 0,

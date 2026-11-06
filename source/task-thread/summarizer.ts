@@ -31,7 +31,7 @@ export interface TaskThreadSummaryResult extends TaskThreadSummarySnapshot {
 
 export interface TaskThreadSummarizer {
 	request(runId: string): TaskThreadSummaryResult
-	peek(runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[]): TaskThreadSummarySnapshot
+	peek(runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[], fingerprint: string): TaskThreadSummarySnapshot
 }
 
 interface Attempt {
@@ -166,8 +166,7 @@ export function createTaskThreadSummarizer(dependencies: TaskThreadSummarizerDep
 		states.set(runId, state)
 		return state
 	}
-	function peek(runId: string, identity: TaskIdentity, entries: readonly TaskThreadEntry[]): TaskThreadSummarySnapshot {
-		const fingerprint = threadFingerprint(identity, entries)
+	function peek(runId: string, _identity: TaskIdentity, _entries: readonly TaskThreadEntry[], fingerprint: string): TaskThreadSummarySnapshot {
 		const artifact = parseSummaryArtifact(dependencies.readSummaryText(runId))
 		if (artifact !== null && artifact.runId === runId && artifact.fingerprint === fingerprint) {
 			forgetIdle(runId)
@@ -200,7 +199,7 @@ export function createTaskThreadSummarizer(dependencies: TaskThreadSummarizerDep
 				return { state: 'none', summary: null, done: Promise.resolve() }
 			}
 			const fingerprint = threadFingerprint(thread.identity, thread.entries)
-			const snapshot = peek(runId, thread.identity, thread.entries)
+			const snapshot = peek(runId, thread.identity, thread.entries, fingerprint)
 			if (snapshot.state === 'ready') return { ...snapshot, done: Promise.resolve() }
 			const state = stateFor(runId)
 			state.lastSeenFingerprint = fingerprint

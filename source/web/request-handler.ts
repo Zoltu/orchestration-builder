@@ -21,7 +21,7 @@ import { DEMO_SCENARIOS, deriveDemoFrameModel, deriveDemoFrameOperationDetail, f
 import type { ReadRunSnapshot } from './snapshot-cache.js'
 import { deriveVersion, type VersionToken } from './version.js'
 import { buildFlowModel, buildFlowOperationDetail, buildRunView, gatherFlowInputs, gatherRunViewInputs, MAX_LOG_LINES } from './versioned-views.js'
-import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.js'
+import type { TaskThreadPageRequest, TaskThreadReaderResult, TaskThreadSummarySnapshot } from '../task-thread/index.js'
 
 // The log window endpoint's paging defaults and cap: a 1s poll that wants a compact identity view
 // fetches 50 rows, and no single request may be tricked (or misconfigured) into serializing the
@@ -40,7 +40,7 @@ export interface RequestHandlerConfig {
 	readRunListSummary: ReadRunListSummary
 	readRunPlanById: ReadRunPlanById
 	readRunSnapshotStats: ReadRunSnapshotStats
-	readTaskThread: (runId: string) => TaskThreadResponse | null
+	readTaskThread: (runId: string, request?: TaskThreadPageRequest) => TaskThreadReaderResult
 	requestTaskThreadSummary: (runId: string) => TaskThreadSummarySnapshot
 	listRunIds: ListRunIds
 	readProjectSettings: ReadProjectSettings
@@ -288,9 +288,20 @@ function isKnownRun(readRunSnapshotStats: ReadRunSnapshotStats, runId: string): 
 	return stats.meta !== null || stats.log !== null
 }
 
-function handleGetTaskThread(runId: string, readTaskThread: (runId: string) => TaskThreadResponse | null): Response {
-	const thread = readTaskThread(runId)
+function parseTaskThreadPageRequest(query: URLSearchParams): TaskThreadPageRequest {
+	const beforeValue = query.get('before')
+	const before = beforeValue === null ? undefined : beforeValue
+	const limitValue = query.get('limit')
+	if (limitValue === null || limitValue === '') return { before }
+	const parsedLimit = Number(limitValue)
+	if (!Number.isInteger(parsedLimit)) return { before }
+	return { limit: parsedLimit, before }
+}
+
+function handleGetTaskThread(runId: string, readTaskThread: (runId: string, request?: TaskThreadPageRequest) => TaskThreadReaderResult, query: URLSearchParams): Response {
+	const thread = readTaskThread(runId, parseTaskThreadPageRequest(query))
 	if (thread === null) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
+	if ('kind' in thread && thread.kind === 'invalid_cursor') return jsonNoStore({ ok: false, error: 'invalid_cursor' }, 400)
 	return jsonNoStore(thread)
 }
 
@@ -610,7 +621,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 						if (suffix === 'diagnostics') return handleRunDiagnostics(readRunDiagnostics, runId)
 						if (suffix === 'thread') {
 							if (!isSafeThreadRunId(runId)) return jsonNoStore({ ok: false, error: 'not_found' }, 404)
-							return handleGetTaskThread(runId, readTaskThread)
+							return handleGetTaskThread(runId, readTaskThread, url.searchParams)
 						}
 					}
 				}

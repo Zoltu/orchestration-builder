@@ -125,6 +125,7 @@ export { generateRunId } from './run-id.js'
 export { createDockerSecretReader, resolveKagiApiKey } from './secrets.js'
 
 export {
+	writeFileAtomically,
 	createRunDirectory,
 	createRunDirectoryExists,
 	createAppendLog,
@@ -172,6 +173,7 @@ export type {
 	WritePauseRequest,
 	DeletePauseRequest,
 	ReadRunFormat,
+	WriteFileAtomically,
 	RunCheckpointExists,
 	ReadRunSnapshotById,
 	ReadRunMetaById,

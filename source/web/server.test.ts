@@ -12,8 +12,8 @@ import type { HealthView } from '../executor/index.js'
 import { isObject, isRunMeta } from '../executor/validation.ts'
 import { parseLogEvents, parseRunMeta, type RunSnapshot } from '../run-log/index.js'
 import type { BuildInfo } from './build-info.ts'
-import { createTaskThreadCoreReader, createTaskThreadReader } from '../task-thread/index.ts'
-import type { TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.ts'
+import { createTaskThreadCoreReader, createTaskThreadReader, createThreadJournalStore } from '../task-thread/index.ts'
+import type { TaskThreadReaderResult, TaskThreadResponse, TaskThreadSummarySnapshot } from '../task-thread/index.ts'
 import type { TaskSummary } from '../task-thread/summary.ts'
 import { createRunListCache } from './run-list-cache.ts'
 import { applyFlowFrame, createFlowFeedResponder, emptyFlowFeedState } from './static/ts/flow-feed/index.js'
@@ -559,7 +559,7 @@ function createTestProviderSuspension(): { adoptSuspendedRun(runId: string): voi
 	}
 }
 
-function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string) => TaskThreadResponse | null, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot, deletePauseRequest?: () => boolean, readRunDiagnostics?: (runId: string) => RunDiagnostics | null } = {}): HandlerHarness {
+function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildInfo | null, initialQueueItems?: QueueSeedItem[], initialCheckpoints?: Map<string, string>, initialMetas?: Map<string, string>, flowFeedOptions?: FlowFeedResponderOptions, listRunIds?: ListRunIds, readRunFormat?: ReadRunFormat, canDispatch?: () => boolean, health?: HealthView, readTaskThread?: (runId: string, request?: { limit?: number, before?: string }) => TaskThreadReaderResult, requestTaskThreadSummary?: (runId: string) => TaskThreadSummarySnapshot, deletePauseRequest?: () => boolean, readRunDiagnostics?: (runId: string) => RunDiagnostics | null } = {}): HandlerHarness {
 	let resolveActive: (meta: RunMeta) => void = () => {}
 	let resolveResumed: (meta: RunMeta) => void = () => {}
 	let capturedEffort: EffortLevel | undefined
@@ -840,6 +840,8 @@ function taskThreadResponse(runId: string): TaskThreadResponse {
 			latestHumanEvent: null,
 		},
 		entries: [],
+		pagination: { hasMoreOlder: false, nextCursor: null },
+		threadFingerprint: 'fingerprint',
 		runs: [{ runId, effort: 'thorough', involvement: 'collaborative' }],
 		summary: null,
 		summaryState: 'none',
@@ -1439,6 +1441,34 @@ describe('GET /api/runs/:id/thread', () => {
 		const body = await response.json()
 		expect(body).toEqual(thread)
 		expect(body.runs).toEqual([{ runId: 'run-20260101-000200', effort: 'thorough', involvement: 'collaborative' }])
+	})
+
+	test('parses limit and before leniently before reading', async () => {
+		const requests: Array<{ limit?: number, before?: string } | undefined> = []
+		const { handler } = createHandlerHarness({
+			readTaskThread: (runId, request) => {
+				requests.push(request)
+				return taskThreadResponse(runId)
+			},
+		})
+		await handler(get('/api/runs/run-20260101-000200/thread?limit=250&before=entry-7'))
+		await handler(get('/api/runs/run-20260101-000200/thread?limit=oops&before='))
+		await handler(get('/api/runs/run-20260101-000200/thread?limit=1.5'))
+		expect(requests[0]).toEqual({ limit: 250, before: 'entry-7' })
+		expect(requests[1]).toEqual({ before: '' })
+		expect(requests[2]).toEqual({ before: undefined })
+	})
+
+	test('returns 400 invalid_cursor for a provided cursor that names no entry', async () => {
+		const { handler } = createHandlerHarness({
+			readTaskThread: (runId, request) => request?.before === 'missing-entry' || request?.before === '' ? { kind: 'invalid_cursor' } : taskThreadResponse(runId),
+		})
+		for (const path of ['/api/runs/run-20260101-000200/thread?before=missing-entry', '/api/runs/run-20260101-000200/thread?before=']) {
+			const response = await handler(get(path))
+			expect(response.status).toBe(400)
+			expect(response.headers.get('cache-control')).toBe('no-store')
+			expect(await response.json()).toEqual({ ok: false, error: 'invalid_cursor' })
+		}
 	})
 
 	test('returns 404 for an unknown run or a null reader result', async () => {
@@ -3744,12 +3774,18 @@ describe('provider failure detail exposure', () => {
 	test('the raw body appears in the raw log and diagnostics endpoint, but never in polled run view, flow, or task-thread payloads', async () => {
 		const runId = 'run-20260101-000700'
 		const raw = rawSnapshotById(runId)
+		const journalStore = createThreadJournalStore({
+			readThreadJournalText: () => null,
+			writeThreadJournalText: () => {},
+			appendThreadJournalCursor: () => {},
+			readLogText: () => raw.logText,
+			readLogStat: () => ({ size: Buffer.byteLength(raw.logText, 'utf8'), mtimeMs: 1 }),
+			readRunMetaText: () => raw.metaText,
+		})
+		const journalRead = journalStore.read(runId)
 		const core = createTaskThreadCoreReader({
 			readRunMetaTextById: (requestedRunId) => requestedRunId === runId ? raw.metaText : null,
-			readRunLogTextFromById: (requestedRunId, byteOffset) => requestedRunId === runId ? Buffer.from(raw.logText, 'utf8').subarray(byteOffset).toString('utf8') : '',
-			readRunSnapshotStats: (requestedRunId) => requestedRunId === runId
-				? { meta: raw.metaText === null ? null : { size: raw.metaText.length, mtimeMs: 1 }, log: raw.logText === '' ? null : { size: raw.logText.length, mtimeMs: 1 } }
-				: { meta: null, log: null },
+			readThreadJournal: (requestedRunId) => requestedRunId === runId ? journalRead : null,
 			readQueueItems: () => [],
 		})
 		const readTaskThread = createTaskThreadReader({

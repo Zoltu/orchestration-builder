@@ -1,8 +1,7 @@
 // Pure task-thread fetch and summary-trigger decisions. The product client owns the actual fetches and timers; these helpers only decide what a fetched thread implies so the decisions can be exercised in memory.
 
-import { sha256Hex } from '../entity-diff/sha256.js'
-import { TASK_SUMMARY_FORMAT_VERSION } from './wire.js'
-import type { TaskThreadResponse, TaskThreadSummarySnapshot } from './wire.js'
+import { isTaskThreadResponse } from './wire.js'
+import type { TaskThreadEntry, TaskThreadResponse, TaskThreadSummarySnapshot } from './wire.js'
 
 export const TASK_THREAD_SUMMARY_REFETCH_DELAY_MS = 1200
 export const TASK_THREAD_REFRESH_DEBOUNCE_MS = 250
@@ -12,6 +11,7 @@ export const TASK_THREAD_SUMMARY_MAX_AUTO_RETRIES = 2
 export const TASK_THREAD_TRANSIENT_404_MAX_RETRIES = 5
 
 export type TaskThreadLoadState = 'idle' | 'loading' | 'ready' | 'error'
+export type TaskThreadOlderLoadState = 'idle' | 'loading' | 'error'
 
 export type TaskThreadSummaryPlan =
 	| { kind: 'trigger'; key: string }
@@ -44,56 +44,103 @@ export interface TaskThreadRefreshInput {
 	questionKey: string | null
 }
 
-export function taskThreadUrl(runId: string): string {
-	return `api/runs/${encodeURIComponent(runId)}/thread`
+export function taskThreadUrl(runId: string, before?: string): string {
+	const base = `api/runs/${encodeURIComponent(runId)}/thread`
+	if (before === undefined || before === '') return base
+	return `${base}?before=${encodeURIComponent(before)}`
 }
 
 export function taskThreadSummaryUrl(runId: string): string {
 	return `api/runs/${encodeURIComponent(runId)}/thread/summary`
 }
 
-// Mirrors the server's threadFingerprint exactly: the same ordered inputs, JSON encoding, and SHA-256. A client-computed fingerprint can therefore validate a ready summary before applying it.
+// The summary artifact is fingerprinted over the full thread, which a page cannot reconstruct; the server supplies that value on every page.
 export function taskThreadFingerprint(thread: TaskThreadResponse): string {
-	const identity = thread.identity
-	const input = [
-		TASK_SUMMARY_FORMAT_VERSION,
-		identity.runId,
-		identity.status,
-		identity.title,
-		identity.description,
-		identity.currentTask === null ? null : [identity.currentTask.runId, identity.currentTask.text, identity.currentTask.at, identity.currentTask.source],
-		identity.originalTask === null ? null : [identity.originalTask.runId, identity.originalTask.text, identity.originalTask.at, identity.originalTask.source],
-		[
-			identity.lineage.rootRunId,
-			identity.lineage.parentRunId,
-			identity.lineage.continuationCount,
-			identity.lineage.resumeCount,
-			identity.lineage.resumeCountComplete,
-			identity.lineage.depth,
-			identity.lineage.complete,
-			identity.lineage.missingParentRunId,
-			identity.lineage.truncatedReason,
-		],
-		thread.entries.map((entry) => [
-			entry.id,
-			entry.runId,
-			entry.timestamp,
-			entry.kind,
-			entry.actor,
-			entry.label,
-			entry.text,
-			entry.context,
-			entry.status,
-			entry.systemKind,
-			entry.outcome,
-			entry.questionId,
-			entry.relatedEntryId,
-			entry.queueItemId,
-			entry.source,
-			entry.textTruncated,
-		]),
-	]
-	return sha256Hex(JSON.stringify(input))
+	return thread.threadFingerprint
+}
+
+function mergeTaskThreadEntries(olderEntries: readonly TaskThreadEntry[], newerEntries: readonly TaskThreadEntry[]): TaskThreadEntry[] {
+	const byId = new Map<string, TaskThreadEntry>()
+	for (const entry of olderEntries) byId.set(entry.id, entry)
+	for (const entry of newerEntries) byId.set(entry.id, entry)
+	return [...byId.values()].sort((left, right) => left.sequence - right.sequence)
+}
+
+function maximumSequence(entries: readonly TaskThreadEntry[]): number | null {
+	let maximum: number | null = null
+	for (const entry of entries) {
+		if (maximum === null || entry.sequence > maximum) maximum = entry.sequence
+	}
+	return maximum
+}
+
+function latestNonInitialMinimumSequence(latest: TaskThreadResponse): number | null {
+	const initialId = latest.entries[0]?.id
+	let minimum: number | null = null
+	for (const entry of latest.entries) {
+		if (entry.id === initialId) continue
+		if (minimum === null || entry.sequence < minimum) minimum = entry.sequence
+	}
+	return minimum
+}
+
+function hasTaskThreadSequenceGap(held: TaskThreadResponse, latest: TaskThreadResponse): boolean {
+	const heldMaximum = maximumSequence(held.entries)
+	const latestMinimum = latestNonInitialMinimumSequence(latest)
+	if (heldMaximum === null || latestMinimum === null) return false
+	return latestMinimum > heldMaximum + 1
+}
+
+function applyTaskThreadLatestPage(held: TaskThreadResponse, latest: TaskThreadResponse): TaskThreadResponse {
+	return {
+		...latest,
+		entries: mergeTaskThreadEntries(held.entries, latest.entries),
+		pagination: held.pagination,
+	}
+}
+
+function shouldResetTaskThreadOlderRange(held: TaskThreadResponse, latest: TaskThreadResponse): boolean {
+	if (held.runId !== latest.runId || held.entries.length === 0) return true
+	return hasTaskThreadSequenceGap(held, latest)
+}
+
+export function shouldResetTaskThreadOlder(held: TaskThreadResponse | null, latest: TaskThreadResponse, olderPagesLoaded: boolean): boolean {
+	if (!olderPagesLoaded) return false
+	return held === null || shouldResetTaskThreadOlderRange(held, latest)
+}
+
+export function applyTaskThreadLatestResponse(held: TaskThreadResponse | null, latest: TaskThreadResponse, olderPagesLoaded: boolean): TaskThreadResponse {
+	if (!olderPagesLoaded || held === null || shouldResetTaskThreadOlderRange(held, latest)) return latest
+	return applyTaskThreadLatestPage(held, latest)
+}
+
+function applyTaskThreadOlderPage(held: TaskThreadResponse, older: TaskThreadResponse): TaskThreadResponse {
+	return {
+		...held,
+		entries: mergeTaskThreadEntries(older.entries, held.entries),
+		pagination: older.pagination,
+	}
+}
+
+export type TaskThreadOlderResponseOutcome =
+	| { kind: 'ignored' }
+	| { kind: 'error' }
+	| { kind: 'merge'; thread: TaskThreadResponse }
+
+export interface TaskThreadOlderResponseInput {
+	heldThread: TaskThreadResponse | null
+	body: unknown
+	runId: string
+	requestToken: number
+	currentToken: number
+	selectedRunId: string | null
+}
+
+export function applyTaskThreadOlderResponse(input: TaskThreadOlderResponseInput): TaskThreadOlderResponseOutcome {
+	if (!isCurrentTaskThreadResponse(input)) return { kind: 'ignored' }
+	if (input.heldThread === null || input.heldThread.runId !== input.runId) return { kind: 'error' }
+	if (!isTaskThreadResponse(input.body) || input.body.runId !== input.runId) return { kind: 'error' }
+	return { kind: 'merge', thread: applyTaskThreadOlderPage(input.heldThread, input.body) }
 }
 
 export function planTaskThreadSummary(input: TaskThreadSummaryPlanInput): TaskThreadSummaryPlan {

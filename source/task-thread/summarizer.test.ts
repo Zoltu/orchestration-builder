@@ -176,13 +176,13 @@ describe('createTaskThreadSummarizer', () => {
 		const current = thread('Fix the parser')
 		const fingerprint = threadFingerprint(current.identity, current.entries)
 		const readyHarness = createHarness(current, JSON.stringify({ formatVersion: 1, runId: RUN_A, fingerprint, title: 'Cached title', description: 'Cached description.', generatedAt: T0 }))
-		expect(readyHarness.summarizer.peek(RUN_A, current.identity, current.entries).state).toBe('ready')
+		expect(readyHarness.summarizer.peek(RUN_A, current.identity, current.entries, fingerprint).state).toBe('ready')
 		expect(readyHarness.requests.length).toBe(0)
 
 		const pendingHarness = createHarness(thread('Fix the parser'))
 		const pending = pendingHarness.summarizer.request(RUN_A)
 		await pendingHarness.waitForRequests(1)
-		expect(pendingHarness.summarizer.peek(RUN_A, thread('Fix the parser').identity, thread('Fix the parser').entries).state).toBe('pending')
+		expect(pendingHarness.summarizer.peek(RUN_A, thread('Fix the parser').identity, thread('Fix the parser').entries, threadFingerprint(thread('Fix the parser').identity, thread('Fix the parser').entries)).state).toBe('pending')
 		expect(pendingHarness.requests.length).toBe(1)
 		pendingHarness.resolveNext(success(summaryJson('Fix parser', 'Fix the parser.')))
 		await pending.done
@@ -193,7 +193,7 @@ describe('createTaskThreadSummarizer', () => {
 		failedHarness.resolveNext({ kind: 'llm_unavailable', message: 'down' })
 		await failed.done
 		const failedThread = thread('Fix the parser')
-		expect(failedHarness.summarizer.peek(RUN_A, failedThread.identity, failedThread.entries).state).toBe('failed')
+		expect(failedHarness.summarizer.peek(RUN_A, failedThread.identity, failedThread.entries, threadFingerprint(failedThread.identity, failedThread.entries)).state).toBe('failed')
 		expect(failedHarness.requests.length).toBe(1)
 	})
 
@@ -202,7 +202,7 @@ describe('createTaskThreadSummarizer', () => {
 		const first = harness.summarizer.request(RUN_A)
 		await harness.waitForRequests(1)
 		const newer = thread('Fix the parser and add tests')
-		expect(harness.summarizer.peek(RUN_A, newer.identity, newer.entries).state).toBe('none')
+		expect(harness.summarizer.peek(RUN_A, newer.identity, newer.entries, threadFingerprint(newer.identity, newer.entries)).state).toBe('none')
 		harness.setThread(newer)
 		const second = harness.summarizer.request(RUN_A)
 		expect(second.state).toBe('pending')
@@ -220,7 +220,7 @@ describe('createTaskThreadSummarizer', () => {
 		const fingerprint = threadFingerprint(current.identity, current.entries)
 		const artifact = { formatVersion: 1, runId: RUN_A, fingerprint, title: 't '.repeat(500), description: 'd '.repeat(1000), generatedAt: T0 }
 		const harness = createHarness(current, JSON.stringify(artifact))
-		const result = harness.summarizer.peek(RUN_A, current.identity, current.entries)
+		const result = harness.summarizer.peek(RUN_A, current.identity, current.entries, fingerprint)
 		expect(result.state).toBe('ready')
 		expect(result.summary?.title.length).toBeLessThanOrEqual(TASK_SUMMARY_TITLE_MAX_CHARS)
 		expect(result.summary?.description.length).toBeLessThanOrEqual(TASK_SUMMARY_DESCRIPTION_MAX_CHARS)
@@ -279,7 +279,7 @@ describe('createTaskThreadSummarizer', () => {
 		await harness.waitForRequests(1)
 		harness.setThread(thread('Fix the parser and add tests'))
 		const newer = thread('Fix the parser and add tests')
-		const peeked = harness.summarizer.peek(RUN_A, newer.identity, newer.entries)
+		const peeked = harness.summarizer.peek(RUN_A, newer.identity, newer.entries, threadFingerprint(newer.identity, newer.entries))
 		expect(peeked.state).toBe('none')
 		const second = harness.summarizer.request(RUN_A)
 		expect(first.state).toBe('pending')

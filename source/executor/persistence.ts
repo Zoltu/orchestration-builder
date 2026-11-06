@@ -15,7 +15,9 @@ export type WriteMeta = (meta: RunMeta) => void
 
 export const MANIFEST_FILE_NAME = 'manifest.json'
 
-function writeFileAtomically(targetPath: string, contents: string): void {
+export type WriteFileAtomically = (targetPath: string, contents: string) => void
+
+export function writeFileAtomically(targetPath: string, contents: string): void {
 	const tempPath = `${targetPath}.${process.pid}.tmp`
 	fs.writeFileSync(tempPath, contents)
 	fs.renameSync(tempPath, targetPath)

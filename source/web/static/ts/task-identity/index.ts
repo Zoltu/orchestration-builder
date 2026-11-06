@@ -6,6 +6,8 @@ export {
 	TASK_THREAD_SUMMARY_MAX_REFETCHES,
 	TASK_THREAD_SUMMARY_REFETCH_DELAY_MS,
 	TASK_THREAD_SUMMARY_RETRY_COOLDOWN_MS,
+	applyTaskThreadLatestResponse,
+	applyTaskThreadOlderResponse,
 	applyTaskThreadSummarySnapshot,
 	isCurrentTaskThreadResponse,
 	isCurrentTaskThreadSummaryResponse,
@@ -13,6 +15,7 @@ export {
 	planTaskThreadSummary,
 	shouldApplyTaskThreadSummaryFailure,
 	shouldRefreshTaskThread,
+	shouldResetTaskThreadOlder,
 	shouldRetryTaskThread404,
 	taskThreadFingerprint,
 	taskThreadRefreshSignal,
@@ -21,6 +24,6 @@ export {
 	taskThreadSummaryUrl,
 	taskThreadUrl,
 } from './state.js'
-export type { TaskThreadLoadState } from './state.js'
+export type { TaskThreadLoadState, TaskThreadOlderLoadState } from './state.js'
 export { deriveTaskIdentityHeader, TaskIdentityHeader } from './header.js'
 export { createTaskHistoryDrawerRenderer } from './history-drawer.js'

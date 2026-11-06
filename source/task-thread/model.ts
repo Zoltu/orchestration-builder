@@ -6,11 +6,6 @@ import type { TaskSummary, TaskSummaryState } from './summary.js'
 export const TASK_THREAD_FORMAT_VERSION = 1
 
 export const TASK_THREAD_MAX_LINEAGE_RUNS = 32
-export const TASK_THREAD_MAX_ENTRIES = 300
-export const TASK_THREAD_MAX_ENTRIES_PER_RUN = 200
-export const TASK_THREAD_MAX_ENTRY_TEXT_CHARS = 4000
-export const TASK_THREAD_MAX_ENTRY_CONTEXT_CHARS = 2000
-export const TASK_THREAD_MAX_TEXT_CHARS = 200_000
 export const TASK_THREAD_MAX_LATEST_HUMAN_CHIP_CHARS = 140
 export const TASK_IDENTITY_TITLE_MAX_CHARS = 80
 export const TASK_IDENTITY_DESCRIPTION_MAX_CHARS = 600
@@ -117,11 +112,18 @@ export interface TaskThreadRunInfo {
 	involvement: InvolvementLevel | null
 }
 
+export interface TaskThreadPagination {
+	hasMoreOlder: boolean
+	nextCursor: string | null
+}
+
 export interface TaskThreadResponse {
 	formatVersion: typeof TASK_THREAD_FORMAT_VERSION
 	runId: string
 	identity: TaskIdentity
 	entries: TaskThreadEntry[]
+	pagination: TaskThreadPagination
+	threadFingerprint: string
 	runs?: TaskThreadRunInfo[]
 	summary: TaskSummary | null
 	summaryState: TaskSummaryState
@@ -326,6 +328,13 @@ function isTaskThreadRunInfo(value: unknown): value is TaskThreadRunInfo {
 	return true
 }
 
+function isTaskThreadPagination(value: unknown): value is TaskThreadPagination {
+	if (!isObject(value)) return false
+	if (typeof value.hasMoreOlder !== 'boolean') return false
+	if (value.nextCursor !== null && !isNonEmptyString(value.nextCursor)) return false
+	return value.hasMoreOlder === (value.nextCursor !== null)
+}
+
 export function isTaskThreadResponse(value: unknown): value is TaskThreadResponse {
 	if (!isObject(value)) return false
 	if (value.formatVersion !== TASK_THREAD_FORMAT_VERSION) return false
@@ -333,6 +342,8 @@ export function isTaskThreadResponse(value: unknown): value is TaskThreadRespons
 	if (!isTaskIdentity(value.identity)) return false
 	if (value.identity.runId !== value.runId) return false
 	if (!Array.isArray(value.entries) || !value.entries.every(isTaskThreadEntry)) return false
+	if (!isTaskThreadPagination(value.pagination)) return false
+	if (!isNonEmptyString(value.threadFingerprint)) return false
 	if (value.runs !== undefined && (!Array.isArray(value.runs) || !value.runs.every(isTaskThreadRunInfo))) return false
 	if (value.summary !== null) {
 		if (!isTaskSummary(value.summary)) return false

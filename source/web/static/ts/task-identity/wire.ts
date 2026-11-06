@@ -123,11 +123,18 @@ export interface TaskThreadRunInfo {
 	involvement: InvolvementLevel | null
 }
 
+export interface TaskThreadPagination {
+	hasMoreOlder: boolean
+	nextCursor: string | null
+}
+
 export interface TaskThreadResponse {
 	formatVersion: typeof TASK_THREAD_FORMAT_VERSION
 	runId: string
 	identity: TaskIdentity
 	entries: TaskThreadEntry[]
+	pagination: TaskThreadPagination
+	threadFingerprint: string
 	runs?: TaskThreadRunInfo[]
 	summary: TaskSummary | null
 	summaryState: TaskSummaryState
@@ -326,6 +333,13 @@ function isTaskThreadRunInfo(value: unknown): value is TaskThreadRunInfo {
 	return true
 }
 
+function isTaskThreadPagination(value: unknown): value is TaskThreadPagination {
+	if (!isObject(value)) return false
+	if (typeof value['hasMoreOlder'] !== 'boolean') return false
+	if (value['nextCursor'] !== null && !isNonEmptyString(value['nextCursor'])) return false
+	return value['hasMoreOlder'] === (value['nextCursor'] !== null)
+}
+
 export function isTaskThreadResponse(value: unknown): value is TaskThreadResponse {
 	if (!isObject(value)) return false
 	if (value['formatVersion'] !== TASK_THREAD_FORMAT_VERSION) return false
@@ -334,6 +348,8 @@ export function isTaskThreadResponse(value: unknown): value is TaskThreadRespons
 	if (value['identity']['runId'] !== value['runId']) return false
 	const entries = value['entries']
 	if (!Array.isArray(entries) || !entries.every(isTaskThreadEntry)) return false
+	if (!isTaskThreadPagination(value['pagination'])) return false
+	if (!isNonEmptyString(value['threadFingerprint'])) return false
 	const runs = value['runs']
 	if (runs !== undefined && (!Array.isArray(runs) || !runs.every(isTaskThreadRunInfo))) return false
 	if (value['summary'] !== null) {
