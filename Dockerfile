@@ -9,33 +9,17 @@ WORKDIR /app
 # The digest check doubles as the guard on the sed pair — if they stop matching the sources file, the metadata lands under the live mirror's filenames and sha256sum -c fails on the missing snapshot paths.
 # sudo exists so the model can provision OS toolchains inside the container at run time; it grants root only inside this container, which remains the security boundary, not on the host.
 # The pinned snapshot's Valid-Until is intentionally ignored so runtime apt-get update works; the snapshot is immutable and the build pins its metadata digests.
-# apt's Acquire::Retries covers individual downloads; the retry wrapper covers a whole update/install and adds exponential backoff so a transient snapshot outage delays the build instead of failing it.
+# apt's built-in per-file retries with exponential backoff handle transient snapshot failures, so no whole-command retry loop is needed.
 RUN <<-EOF
 	set -e
 	sed -i 's|^URIs:|# URIs:|' /etc/apt/sources.list.d/debian.sources
 	sed -i 's|^# http://snapshot|URIs: http://snapshot|' /etc/apt/sources.list.d/debian.sources
-	printf '%s\n' 'Acquire::Check-Valid-Until "false";' 'Acquire::Retries "5";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/99snapshot
-	retry_apt() {
-		attempt=1
-		delay=2
-		while [ "$attempt" -le 5 ]; do
-			if "$@"; then
-				return 0
-			fi
-			if [ "$attempt" -eq 5 ]; then
-				return 1
-			fi
-			echo "apt command failed (attempt $attempt of 5); retrying in ${delay}s" >&2
-			sleep "$delay"
-			delay=$((delay * 2))
-			attempt=$((attempt + 1))
-		done
-	}
-	retry_apt apt-get update -o Acquire::Check-Valid-Until=false
+	printf '%s\n' 'Acquire::Check-Valid-Until "false";' 'Acquire::Retries "5";' 'Acquire::Retries::Delay "true";' 'Acquire::Retries::Delay::Maximum "30";' 'Acquire::Retries::HandleRetryAfter "true";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' > /etc/apt/apt.conf.d/99snapshot
+	apt-get update -o Acquire::Check-Valid-Until=false
 	echo "d66e2e0619558676bf085c026cf699c59a61538906128e41909654c2ec9bf741  /var/lib/apt/lists/snapshot.debian.org_archive_debian-security_20260505T000000Z_dists_trixie-security_InRelease
 	046525dd9b1481195c9cecde891d01cd9b3b4c7abb3b4dcde81023a6b6b88453  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie-updates_InRelease
 	7592e4ccb4658a58bfe485d3356b3c983bf8ccff7fca1f6091e4d4296284ed18  /var/lib/apt/lists/snapshot.debian.org_archive_debian_20260505T000000Z_dists_trixie_InRelease" | sha256sum -c
-	retry_apt apt-get install -y --no-install-recommends git ca-certificates sudo
+	apt-get install -y --no-install-recommends git ca-certificates sudo
 	test -s /etc/ssl/certs/ca-certificates.crt
 	printf '%s\n' 'bun ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/bun
 	chmod 0440 /etc/sudoers.d/bun
