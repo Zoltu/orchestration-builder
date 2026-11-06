@@ -33,7 +33,7 @@ curl -X POST http://localhost:12345/api/runs -H 'content-type: application/json'
 docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t adaptive-orchestrator .
 ```
 
-The build bakes the commit sha (`BUILD_SHA` — omit it and the sha is left empty) and a UTC build timestamp (added automatically) into the image, and the serving UI shows this identifier in the top bar.
+The build bakes the commit sha (`BUILD_SHA` — omit it and the sha is left empty) and a UTC build timestamp (added automatically) into the image, and the serving UI shows this identifier in the top bar. The build retries `apt-get update` and `apt-get install` with exponential backoff and configures apt's own `Acquire::Retries`, so a transient snapshot outage delays the build rather than failing it; runtime `sudo apt-get update` uses the same retry config.
 
 ### Installing toolchains at runtime
 
