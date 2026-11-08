@@ -11,7 +11,8 @@
 		"testability": "concepts/testability.md",
 		"verification-and-evidence": "concepts/verification-and-evidence.md",
 		"security-posture": "concepts/security-posture.md",
-		"privacy-posture": "concepts/privacy-posture.md"
+		"privacy-posture": "concepts/privacy-posture.md",
+		"delegation": "concepts/delegation.md"
 	},
 
 	"roles": {
@@ -19,6 +20,7 @@
 			"systemPrompt": "prompts/orchestrator.md",
 			"tools": ["agent", "continue_agent", "ask_human", "finish", "git_status", "git_log", "git_diff", "git_init", "git_commit", "git_branch", "git_set_base"],
 			"projectDocs": ["AGENTS.md", "README.md"],
+			"concepts": ["delegation"],
 			"label": {
 				"detailed": ["Orchestrator"],
 				"friendly": ["Orchestrator"],
@@ -183,8 +185,8 @@
 				"whimsical": ["Chief Architect"]
 			},
 			"description": {
-				"detailed": ["Runs the architecture review loop on completed work, directing reviewers and fixes until the structure is sound."],
-				"friendly": ["Directs architecture reviews and fixes for each piece of work."],
+				"detailed": ["Judges the architecture lens and directs fixes; owns when the work is ready to hand over."],
+				"friendly": ["Judges architecture and decides when the work is ready to hand over."],
 				"whimsical": ["The keeper of the blueprint, making sure every beam belongs."]
 			},
 			"workingLabel": {
@@ -192,7 +194,7 @@
 				"friendly": ["Directing the architecture review"],
 				"whimsical": ["Shuffling the blueprints", "Squinting at the load-bearing walls", "Rearranging the floor plan"]
 			},
-			"concepts": ["dependency-injection", "module-boundaries", "type-safety", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture"]
+			"concepts": ["dependency-injection", "module-boundaries", "type-safety", "error-handling", "external-data-validation", "testability", "verification-and-evidence", "security-posture", "privacy-posture", "delegation"]
 		},
 		"architecture_reviewer": {
 			"systemPrompt": "prompts/architecture_reviewer.md",
@@ -223,8 +225,8 @@
 				"whimsical": ["Style Maven"]
 			},
 			"description": {
-				"detailed": ["Runs the style review loop on completed work, directing reviewers and fixes until the work matches the project's conventions."],
-				"friendly": ["Directs style reviews and fixes for each piece of work."],
+				"detailed": ["Judges the style lens and directs fixes; owns when the work is ready to hand over."],
+				"friendly": ["Judges style and decides when the work is ready to hand over."],
 				"whimsical": ["The tastemaker keeping everything matching."]
 			},
 			"workingLabel": {
@@ -232,7 +234,7 @@
 				"friendly": ["Directing the style review"],
 				"whimsical": ["Coordinating the wardrobe", "Matching the curtains to the carpet", "Enforcing the dress code"]
 			},
-			"concepts": ["style"]
+			"concepts": ["style", "delegation"]
 		},
 		"style_reviewer": {
 			"systemPrompt": "prompts/style_reviewer.md",
@@ -283,8 +285,8 @@
 				"whimsical": ["Guard Captain"]
 			},
 			"description": {
-				"detailed": ["Runs the security review loop on completed work, directing reviewers and fixes until the work is safe."],
-				"friendly": ["Directs security reviews and fixes for each piece of work."],
+				"detailed": ["Judges the security lens and directs fixes; owns when the work is ready to hand over."],
+				"friendly": ["Judges security and decides when the work is ready to hand over."],
 				"whimsical": ["The watch captain who double-checks the locks."]
 			},
 			"workingLabel": {
@@ -292,7 +294,7 @@
 				"friendly": ["Directing the security review"],
 				"whimsical": ["Rattling the doorknobs", "Posting the night watch", "Counting the keys"]
 			},
-			"concepts": ["external-data-validation", "security-posture", "privacy-posture"]
+			"concepts": ["external-data-validation", "security-posture", "privacy-posture", "delegation"]
 		},
 		"security_reviewer": {
 			"systemPrompt": "prompts/security_reviewer.md",
@@ -323,8 +325,8 @@
 				"whimsical": ["Final Judge"]
 			},
 			"description": {
-				"detailed": ["Runs the final acceptance loop: checks the whole workspace against the user's original task and directs fixes for any gaps."],
-				"friendly": ["Makes sure the finished work matches what was asked for."],
+				"detailed": ["Judges the final acceptance lens and directs fixes; owns whether the work satisfies the task and is ready to hand over."],
+				"friendly": ["Judges whether the finished work matches what was asked and is ready to hand over."],
 				"whimsical": ["Bangs the gavel when the work is truly done."]
 			},
 			"workingLabel": {
@@ -332,7 +334,7 @@
 				"friendly": ["Directing the final acceptance review"],
 				"whimsical": ["Preparing the verdict", "Calling the court to order", "Reviewing the evidence"]
 			},
-			"concepts": ["testability", "verification-and-evidence"]
+			"concepts": ["testability", "verification-and-evidence", "delegation"]
 		},
 		"acceptance_reviewer": {
 			"systemPrompt": "prompts/acceptance_reviewer.md",
@@ -428,7 +430,8 @@
 				"detailed": ["role {participantRole} is deciding how to recover (streaming tokens)"],
 				"friendly": ["Deciding how to recover"],
 				"whimsical": ["Patching things up", "Picking up the pieces", "Diagnosing the ailment", "Brewing a fix"]
-			}
+			},
+			"concepts": ["delegation"]
 		}
 	},
 

@@ -149,25 +149,28 @@ const expectedConcepts: Record<string, string> = {
 	'verification-and-evidence': 'concepts/verification-and-evidence.md',
 	'security-posture': 'concepts/security-posture.md',
 	'privacy-posture': 'concepts/privacy-posture.md',
+	delegation: 'concepts/delegation.md',
 }
 
 // The concept names each role must declare, in order; the raw array is compared, not a set, so a duplicate or reordered entry fails. A role absent here must declare no concepts, so a new declaration is a deliberate, pinned change.
 const expectedRoleConcepts: Record<string, string[]> = {
+	orchestrator: ['delegation'],
 	coder: ['style', 'dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
-	style_lead: ['style'],
+	style_lead: ['style', 'delegation'],
 	style_reviewer: ['style'],
 	style_guide_author: ['style'],
 	change_summarizer: ['style'],
 	planner: ['module-boundaries', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
-	architecture_lead: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
+	architecture_lead: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture', 'delegation'],
 	architecture_reviewer: ['dependency-injection', 'module-boundaries', 'type-safety', 'error-handling', 'external-data-validation', 'testability', 'verification-and-evidence', 'security-posture', 'privacy-posture'],
-	security_lead: ['external-data-validation', 'security-posture', 'privacy-posture'],
+	security_lead: ['external-data-validation', 'security-posture', 'privacy-posture', 'delegation'],
 	security_reviewer: ['external-data-validation', 'security-posture', 'privacy-posture'],
-	acceptance_lead: ['testability', 'verification-and-evidence'],
+	acceptance_lead: ['testability', 'verification-and-evidence', 'delegation'],
 	acceptance_reviewer: ['testability', 'verification-and-evidence'],
 	analyst: ['module-boundaries', 'security-posture', 'privacy-posture'],
 	technical_writer: ['style', 'verification-and-evidence'],
 	verifier: ['verification-and-evidence'],
+	recovery: ['delegation'],
 }
 
 // Headings each concept file must carry, pinned so gutting a file's content while keeping its name fails the gate the way a dropped file does.
@@ -182,6 +185,7 @@ const conceptHeadings: Record<string, string[]> = {
 	'verification-and-evidence': ['## Verification and evidence'],
 	'security-posture': ['## Security posture'],
 	'privacy-posture': ['## Privacy posture'],
+	delegation: ['## Delegation'],
 }
 
 // Distinctive fragments of each concept's body, pinned so gutting a file's content while keeping its headings fails the gate the way a dropped heading does.
@@ -196,6 +200,7 @@ const conceptFragments: Record<string, string[]> = {
 	'verification-and-evidence': ['Verification means running the project'],
 	'security-posture': ['Minimize dependencies'],
 	'privacy-posture': ['Default to local processing'],
+	delegation: ['A subagent is a specialist, not a blank assistant'],
 }
 
 // The style concept owns these fragments; the composed style prompts must not re-inline them, so any that appears in a composed prompt is a failure.
@@ -351,10 +356,26 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 	check(orchestratorPrompt.includes('ask_human'), 'guild: orchestrator prompt does not mention ask_human')
 
 	// These roles scale their behavior to the run's effort tier, so each prompt must name all three tier modes.
-	for (const role of ['orchestrator', 'planner', 'coder', 'researcher', 'analyst', 'technical_writer', 'verifier', 'architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
+	for (const role of ['orchestrator', 'planner', 'coder', 'researcher', 'analyst', 'technical_writer', 'verifier']) {
 		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
 		for (const tier of ['quick mode', 'standard mode', 'thorough mode']) {
 			check(prompt.includes(tier), `guild: role "${role}" prompt lacks the "${tier}" tier`)
+		}
+	}
+
+	// A lead's prompt sets the effort scene rather than restating the modes, so it must name all three levels.
+	for (const role of ['architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
+		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
+		for (const level of ['quick:', 'standard:', 'thorough:']) {
+			check(prompt.includes(level), `guild: role "${role}" prompt lacks the "${level}" effort level`)
+		}
+	}
+
+	// A lead's prompt is judge language: it must never reintroduce reviewer severity vocabulary.
+	for (const role of ['architecture_lead', 'style_lead', 'security_lead', 'acceptance_lead']) {
+		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
+		for (const token of ['blocking', 'suggestion', 'severity']) {
+			check(!prompt.includes(token), `guild: role "${role}" prompt must not contain "${token}"`)
 		}
 	}
 
@@ -387,10 +408,10 @@ function checkGuild(loaded: LoadedGuildFiles): void {
 		check(!reviewer.tools.includes('agent'), `guild: reviewer "${role}" must not delegate`)
 		check(!reviewer.tools.includes('write_file'), `guild: reviewer "${role}" must be read-only`)
 		check(reviewer.tools.includes('read_file'), `guild: reviewer "${role}" must hold "read_file"`)
-		// The shared reviewer contract: severity tags and the compact-digest return.
+		// The shared reviewer contract: observations, not severity verdicts.
 		const prompt = (loaded.prompts[role] ?? '').toLowerCase()
-		check(prompt.includes('blocking'), `guild: reviewer "${role}" prompt lacks the "blocking" severity tag`)
-		check(prompt.includes('suggestion'), `guild: reviewer "${role}" prompt lacks the "suggestion" severity tag`)
+		check(prompt.includes('observation'), `guild: reviewer "${role}" prompt lacks the observation contract`)
+		check(!prompt.includes('blocking') && !prompt.includes('suggestion') && !prompt.includes('severity'), `guild: reviewer "${role}" prompt must not carry severity tags`)
 	}
 
 	const detector = config.roles['loop_detector']
