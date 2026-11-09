@@ -1,6 +1,6 @@
 {
 	"name": "ask_human",
-	"description": "Ask the human user a clarifying question when a reasonable guess cannot be made. Returns the user's answer. The human's question card is built from this call: put all the background the human needs in `context`, not only in the surrounding assistant prose. Assistant prose may appear on the card only as a fallback, and it must never be relied on. Use sparingly; prefer reasonable defaults and explain them.",
+	"description": "Ask the human user a clarifying question when a reasonable guess cannot be made. Returns the user's answer. The human's question card is built from this call: put all the background the human needs in `context`, not only in the surrounding assistant prose. The question and context are rendered as Markdown, so use Markdown for structure — blank lines between paragraphs, `-` or `*` for lists, and inline code for identifiers — rather than plain-text spacing or Unicode bullet characters. Assistant prose may appear on the card only as a fallback, and it must never be relied on. Use sparingly; prefer reasonable defaults and explain them.",
 	"humanLabel": {
 		"detailed": ["Ask Human"],
 		"friendly": ["Question"],
@@ -29,11 +29,11 @@
 		"properties": {
 			"question": {
 				"type": "string",
-				"description": "A clear, non-technical question that stands on its own, without reference to the preceding conversation."
+				"description": "A clear, non-technical question that stands on its own, without reference to the preceding conversation. Markdown is rendered."
 			},
 			"context": {
 				"type": "string",
-				"description": "All the background needed to answer: the goal, relevant findings or decisions, the options, and your recommended default. The human sees only the question and this context, not the conversation, so relay everything necessary here rather than leaving it only in assistant prose."
+				"description": "All the background needed to answer: the goal, relevant findings or decisions, the options, and your recommended default. The human sees only the question and this context, not the conversation, so relay everything necessary here rather than leaving it only in assistant prose. Markdown is rendered; use Markdown lists and paragraph breaks for structure."
 			}
 		}
 	}
