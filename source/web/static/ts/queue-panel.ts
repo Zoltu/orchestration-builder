@@ -22,6 +22,10 @@ export interface QueueItemLike {
 	suspendedAt?: string
 	// Optional operator pause record when a projection includes it; the run summary is the current source for the kind.
 	pause?: OperatorPauseRecord | null
+	// A yielded operator pause: the run stays suspended and resumable, but the waiting work ahead of it runs first.
+	yielded?: true
+	// active/suspended: the run checkpoint's write state, or null when the checkpoint is missing, corrupt, or unknown.
+	writeCapableStarted?: boolean | null
 	// needs_input: the recorded question.
 	question?: string
 	// needs_input: the operator-facing presentation recorded with the question (explicit context or the visible assistant fallback).
@@ -51,6 +55,10 @@ function isOptionalString(value: unknown): boolean {
 	return value === undefined || typeof value === 'string'
 }
 
+function isOptionalWriteState(value: unknown): boolean {
+	return value === undefined || value === null || typeof value === 'boolean'
+}
+
 // The minimal shape the panel renders: any polled entry without it is dropped rather than half-rendered.
 export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isObject(value)) return false
@@ -62,26 +70,114 @@ export function isQueueItemLike(value: unknown): value is QueueItemLike {
 	if (!isOptionalString(value['question'])) return false
 	if (!isOptionalString(value['context'])) return false
 	if (!isOptionalString(value['assistantFallback'])) return false
+	const status = value['status']
+	if (!QUEUE_ITEM_STATUSES.some((known) => known === status)) return false
+	const yielded = value['yielded']
+	if (yielded !== undefined) {
+		if (yielded !== true) return false
+		// The backend carries the yielded marker only on a suspended operator pause or its transient active dispatch marker.
+		if (status !== 'suspended' && status !== 'active') return false
+	}
+	if (!isOptionalWriteState(value['writeCapableStarted'])) return false
 	const pause = value['pause']
 	if (pause !== undefined && pause !== null && !isOperatorPauseRecord(pause)) return false
-	return QUEUE_ITEM_STATUSES.some((status) => status === value['status'])
+	return true
 }
 
 export interface QueuedItems {
+	// Suspended rows that take priority over the run order: a provider suspension, or an operator pause whose run has written or whose write state is unknown.
 	suspended: QueueItemLike[]
-	waiting: QueueItemLike[]
+	// The drag order: waiting items plus operator-paused pre-write suspended items, in file order.
+	runOrder: QueueItemLike[]
 	active: QueueItemLike[]
 	needsInput: QueueItemLike[]
 }
 
-// The queued rows the merged history screen shows above the run list, in display order: the suspended pause first (it outranks all waiting work), then the waiting items head-first (the order they will run in), then the one active item, then the items parked on a question. Settled items (done/error/cancelled) get no row here — their runs carry the outcome in the history list below.
+// A suspended row is an operator pause when its own projected pause record is present. Provider suspensions carry a suspension record instead.
+export function isOperatorPausedItem(item: QueueItemLike): boolean {
+	return item.status === 'suspended' && readOperatorPauseRecord(item) !== null
+}
+
+// Only an operator pause before any write can be reordered: once a write-capable role has started, moving the run would move work that already touched the workspace.
+export function isPausedPreWrite(item: QueueItemLike): boolean {
+	return isOperatorPausedItem(item) && item.writeCapableStarted === false
+}
+
+export function isPausedPostWrite(item: QueueItemLike): boolean {
+	return isOperatorPausedItem(item) && item.writeCapableStarted === true
+}
+
+// The write-state pill for a live item. Waiting rows have no checkpoint yet, so they carry no pre/post pill; a missing, null, or unrecognized state is explicitly unknown rather than guessed.
+export function writeStateLabel(item: QueueItemLike): 'Pre-write' | 'Post-write' | 'Write state unknown' | null {
+	if (item.status !== 'active' && item.status !== 'suspended') return null
+	if (item.writeCapableStarted === false) return 'Pre-write'
+	if (item.writeCapableStarted === true) return 'Post-write'
+	return 'Write state unknown'
+}
+
+// The run order the drag follows: waiting items plus operator-paused pre-write suspended items (including yielded ones), in file order. Non-orderable rows stay at their file positions around them.
+export function deriveRunOrderItems(items: QueueItemLike[]): QueueItemLike[] {
+	return items.filter((item) => item.status === 'waiting' || isPausedPreWrite(item))
+}
+
+// The run-order index a drop should PATCH: the target row's index among the run-order items excluding the dragged one. Dropping onto itself, or onto a row that is not orderable, is no move at all, read as null.
+export function deriveRunOrderPosition(items: QueueItemLike[], draggedId: string, targetId: string): number | null {
+	if (draggedId === targetId) return null
+	const runOrder = deriveRunOrderItems(items)
+	if (!runOrder.some((item) => item.id === draggedId)) return null
+	const others = runOrder.filter((item) => item.id !== draggedId)
+	const targetIndex = others.findIndex((item) => item.id === targetId)
+	if (targetIndex === -1) return null
+	return Math.max(0, Math.min(targetIndex, others.length))
+}
+
+// The optimistic client-side reorder, mirroring the executor's reorderRunOrderItem: the orderable items re-slot into the clamped position while every non-orderable item keeps its file position.
+export function reorderRunOrderItems(items: QueueItemLike[], draggedId: string, position: number): QueueItemLike[] {
+	const dragged = items.find((item) => item.id === draggedId)
+	if (dragged === undefined) return items
+	if (dragged.status !== 'waiting' && !isPausedPreWrite(dragged)) return items
+	const others = items.filter((item) => (item.status === 'waiting' || isPausedPreWrite(item)) && item.id !== draggedId)
+	const clamped = Math.max(0, Math.min(position, others.length))
+	const moved = [...others.slice(0, clamped), dragged, ...others.slice(clamped)]
+	const result: QueueItemLike[] = []
+	let movedIndex = 0
+	for (const item of items) {
+		if (item.status !== 'waiting' && !isPausedPreWrite(item)) {
+			result.push(item)
+			continue
+		}
+		const positioned = moved[movedIndex]
+		if (positioned === undefined) throw new Error(`reorderRunOrderItems: ran out of moved items at index ${movedIndex}`)
+		result.push(positioned)
+		movedIndex += 1
+	}
+	return result
+}
+
+// The breadcrumb above an orderable row: first in line, or how many runnable tasks it follows. A non-orderable row has no run-order position, read as null.
+export function runOrderHint(item: QueueItemLike, items: QueueItemLike[]): string | null {
+	const runOrder = deriveRunOrderItems(items)
+	const index = runOrder.findIndex((candidate) => candidate.id === item.id)
+	if (index === -1) return null
+	if (index === 0) return 'First in run order'
+	return index === 1 ? '1 runnable task ahead' : `${index} runnable tasks ahead`
+}
+
+// The queued rows the merged history screen shows above the run list, in the groups the history merge renders: priority suspended rows first, then the run order (waiting plus pre-write operator pauses), then the one active item, then the items parked on a question. Settled items (done/error/cancelled) get no row here — their runs carry the outcome in the history list below.
 export function deriveQueuedItems(items: unknown[]): QueuedItems {
-	const queued: QueuedItems = { suspended: [], waiting: [], active: [], needsInput: [] }
+	const queued: QueuedItems = { suspended: [], runOrder: [], active: [], needsInput: [] }
 	for (const item of items) {
 		if (!isQueueItemLike(item)) continue
-		if (item.status === 'suspended') queued.suspended.push(item)
-		else if (item.status === 'waiting') queued.waiting.push(item)
-		else if (item.status === 'active') queued.active.push(item)
+		if (item.status === 'suspended') {
+			if (isPausedPreWrite(item)) queued.runOrder.push(item)
+			else queued.suspended.push(item)
+			continue
+		}
+		if (item.status === 'waiting') {
+			queued.runOrder.push(item)
+			continue
+		}
+		if (item.status === 'active') queued.active.push(item)
 		else if (item.status === 'needs_input') queued.needsInput.push(item)
 	}
 	return queued
@@ -105,6 +201,12 @@ export function queueStatusLabel(status: string, pauseKind: RunPauseKind = 'none
 	const suspendedLabel = deriveSuspendedStatusLabel(status, pauseKind, needsAttention)
 	if (suspendedLabel !== null) return suspendedLabel
 	return QUEUE_STATUS_LABELS[status] ?? status
+}
+
+// The row's status text: a yielded suspended pause reads as queued before writing rather than a priority operator pause. The yielded marker survives reactivation, so it must not relabel the active run that is now executing the resume.
+export function queueStatusText(item: QueueItemLike, pauseKind: RunPauseKind = 'none', needsAttention = false): string {
+	if (item.status === 'suspended' && item.yielded === true) return 'queued before writing'
+	return queueStatusLabel(item.status, pauseKind, needsAttention)
 }
 
 // A suspended row takes its kind from the item's own optional pause record first, then the matching run summary, so a projection that carries either identifies an operator pause.
@@ -140,34 +242,4 @@ export function matchesParkedRun(item: QueueItemLike, runId: string): boolean {
 	if (item.status !== 'needs_input') return false
 	if (typeof item.runId !== 'string' || item.runId === '') return false
 	return item.runId === runId
-}
-
-// The waiting-list index a drop should PATCH: the target row's index among the waiting items, excluding the dragged one (the server clamps out-of-range values). Dropping onto the dragged item itself — or onto a row that is not waiting — is no move at all, read as null.
-export function deriveReorderPosition(items: QueueItemLike[], draggedId: string, targetId: string): number | null {
-	if (draggedId === targetId) return null
-	const waitingIds = items.filter((item) => item.status === 'waiting' && item.id !== draggedId).map((item) => item.id)
-	const targetIndex = waitingIds.indexOf(targetId)
-	return targetIndex === -1 ? null : targetIndex
-}
-
-// The optimistic client-side reorder, mirroring the executor's reorderWaitingItem: the waiting items re-slug into the clamped position while every other item keeps its file position.
-export function reorderWaitingItems(items: QueueItemLike[], draggedId: string, position: number): QueueItemLike[] {
-	const dragged = items.find((item) => item.id === draggedId)
-	if (dragged === undefined || dragged.status !== 'waiting') return items
-	const others = items.filter((item) => item.status === 'waiting' && item.id !== draggedId)
-	const clamped = Math.max(0, Math.min(position, others.length))
-	const moved = [...others.slice(0, clamped), dragged, ...others.slice(clamped)]
-	const result: QueueItemLike[] = []
-	let movedIndex = 0
-	for (const item of items) {
-		if (item.status !== 'waiting') {
-			result.push(item)
-			continue
-		}
-		const positioned = moved[movedIndex]
-		if (positioned === undefined) throw new Error(`reorderWaitingItems: ran out of moved items at index ${movedIndex}`)
-		result.push(positioned)
-		movedIndex += 1
-	}
-	return result
 }

@@ -6,7 +6,7 @@ import type { DeploymentConfig, EffortLevel, GuildConfig, InvolvementLevel, LogL
 import { isEffortLevel, isInvolvementLevel, isLogLevel, isObject, isTerminalRunStatus } from '../executor/validation.js'
 import type { QueueItemView, QueueMutationOutcome, TaskQueueModule } from '../executor/queue/index.js'
 import type { RunState } from '../executor/run-state.js'
-import type { ResumeErroredOrSuspendedRun, RunSubmission } from '../executor/run-submission.js'
+import type { ReadWriteCapableStartedById, ResumeErroredOrSuspendedRun, RunSubmission } from '../executor/run-submission.js'
 import { formatLogAsText, formatLogDetailSections } from '../run-log/format/index.js'
 import { filterLogEventsForInstance, foldLlmCallSent, paginateLogEvents } from '../run-log/window/index.js'
 import { parseRunMeta } from '../run-log/index.js'
@@ -65,6 +65,8 @@ export interface RequestHandlerConfig {
 	runListFeedResponder: RunListFeedResponder
 	// The on-demand diagnostics reader behind GET /api/runs/:id/diagnostics; null is an unknown, malformed, or traversal-shaped run id and the route answers 404.
 	readRunDiagnostics: (runId: string) => RunDiagnostics | null
+	// The checkpoint-derived write-state reader behind GET /api/queue's writeCapableStarted projection.
+	readWriteCapableStartedById: ReadWriteCapableStartedById
 }
 
 // The static-asset leaf: given a GET path that matched no API route, produce the response. Injected so the routing below is exercisable without touching the filesystem or a socket. Async because the index route reads the served body to substitute the page title (see server.ts createServeStatic).
@@ -424,7 +426,10 @@ async function parseResumeBody(request: Request): Promise<{ ok: true; note?: str
 // The explicit resume of an error-ended or suspended run: same-run-id continuation from the kept checkpoint (docs/queueing.md "Resume of an errored or suspended run" and the suspended resume). Status codes follow the API's conventions — an unknown run is 404, a state conflict (wrong status, no checkpoint, run in flight) is 409 — and the checkpoint-missing conflict names the briefed-continuation alternative, which stays the fallback for runs without a checkpoint.
 function handleResumeErroredOrSuspendedRun(resumeErroredOrSuspendedRun: ResumeErroredOrSuspendedRun, runId: string, note: string | undefined): Response {
 	const result = resumeErroredOrSuspendedRun(runId, note)
-	if (result.ok) return json({ runId: result.runId }, 201)
+	if (result.ok) {
+		if (result.queued === true) return json({ ok: true, runId: result.runId, queued: true }, 202)
+		return json({ runId: result.runId }, 201)
+	}
 	if (result.error === 'run_not_found') return json({ ok: false, error: 'not_found' }, 404)
 	if (result.error === 'run_in_progress') return json({ ok: false, error: 'run_in_progress' }, 409)
 	if (result.error === 'run_suspended') return json({ ok: false, error: 'run_suspended' }, 409)
@@ -443,18 +448,22 @@ function queueMutationResponse(result: QueueMutationOutcome): Response {
 	return json({ ok: false, error: 'status_forbidden' }, 409)
 }
 
-// A suspended item carries only its run id and pause time; the run meta is the source of truth for the pause cause, so project its optional pause record at the HTTP boundary rather than persisting a second copy in the queue.
-function projectQueuePause(items: readonly QueueItemView[], readRunMetaById: ReadRunMetaById): QueueItemView[] {
+// A suspended item carries only its run id and pause time; the run meta is the source of truth for the pause cause, so project its optional pause record at the HTTP boundary rather than persisting a second copy in the queue. An active or suspended item likewise projects the run checkpoint's write state so the panel can tell a pre-write pause (orderable) from a post-write or unknown one.
+function projectQueueRunState(items: readonly QueueItemView[], readRunMetaById: ReadRunMetaById, readWriteCapableStartedById: ReadWriteCapableStartedById): QueueItemView[] {
 	return items.map((item) => {
-		if (item.status !== 'suspended' || item.runId === undefined) return item
+		let projected = item
+		if ((item.status === 'active' || item.status === 'suspended') && item.runId !== undefined) {
+			projected = { ...projected, writeCapableStarted: readWriteCapableStartedById(item.runId) }
+		}
+		if (item.status !== 'suspended' || item.runId === undefined) return projected
 		const meta = parseRunMeta(readRunMetaById(item.runId))
-		if (meta === null || meta.status !== 'suspended' || meta.pause === undefined) return item
-		return { ...item, pause: meta.pause }
+		if (meta === null || meta.status !== 'suspended' || meta.pause === undefined) return projected
+		return { ...projected, pause: meta.pause }
 	})
 }
 
-function handleGetQueue(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById): Response {
-	return json(projectQueuePause(taskQueue.read().items, readRunMetaById))
+function handleGetQueue(taskQueue: TaskQueueModule, readRunMetaById: ReadRunMetaById, readWriteCapableStartedById: ReadWriteCapableStartedById): Response {
+	return json(projectQueueRunState(taskQueue.read().items, readRunMetaById, readWriteCapableStartedById))
 }
 
 // POST /api/queue always enqueues at the tail — never 409 — and ticks the scheduler, so an idle system dispatches the new task within the same request. Only task, effort, and involvement are read from the body: a queue-native item's logLevel resolves through the standard chain at dispatch (docs/queueing.md "The queue: storage, item model, state machine"), and other fields are lineage or outcome bookkeeping the platform owns.
@@ -465,8 +474,8 @@ async function handleEnqueueTask(taskQueue: TaskQueueModule, body: unknown): Pro
 	return json(result.item, 201)
 }
 
-// PATCH edits task/effort/involvement and/or moves the item to a clamped 0-based position in the waiting list; waiting items only.
-function handlePatchQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Response {
+// PATCH edits task/effort/involvement on a waiting item and/or moves any run-order item (a waiting item or an operator-paused pre-write suspended item) to a clamped 0-based position in the run order. A successful reorder ticks so the new order takes effect immediately.
+async function handlePatchQueueItem(taskQueue: TaskQueueModule, itemId: string, body: unknown): Promise<Response> {
 	if (!isObject(body)) return json({ ok: false, error: 'invalid_body' }, 400)
 	const taskValue = body['task']
 	if (taskValue !== undefined && (typeof taskValue !== 'string' || taskValue === '')) return json({ ok: false, error: 'invalid_body' }, 400)
@@ -486,7 +495,18 @@ function handlePatchQueueItem(taskQueue: TaskQueueModule, itemId: string, body: 
 		...(involvement !== undefined ? { involvement } : {}),
 		...(position !== undefined ? { position } : {}),
 	})
+	if (result.ok && position !== undefined) {
+		await taskQueue.tick()
+		// The tick may dispatch or settle the reordered item, so the response reflects the post-tick state rather than the pre-tick snapshot.
+		const current = taskQueue.read().items.find((item) => item.id === itemId)
+		if (current !== undefined) return json(current)
+	}
 	return queueMutationResponse(result)
+}
+
+// POST /api/queue/:id/defer repositions a suspended operator-paused pre-write item at the end of the run order; the order takes effect on its next unpause rather than moving the work immediately.
+async function handleDeferQueueItem(taskQueue: TaskQueueModule, itemId: string): Promise<Response> {
+	return queueMutationResponse(await taskQueue.defer(itemId))
 }
 
 function handleDeleteQueueItem(taskQueue: TaskQueueModule, itemId: string): Response {
@@ -523,7 +543,7 @@ async function handleRequeueQueueItem(taskQueue: TaskQueueModule, itemId: string
 	return queueMutationResponse(await taskQueue.requeue(itemId))
 }
 
-// The PATCH position is a 0-based index into the waiting list (out-of-range values clamp server-side), so it must be a real JSON number — a numeric string or a fraction is a malformed body, not a position.
+// The PATCH position is a 0-based index into the run order (out-of-range values clamp server-side), so it must be a real JSON number — a numeric string or a fraction is a malformed body, not a position.
 function isQueuePosition(value: unknown): value is number {
 	return typeof value === 'number' && Number.isInteger(value)
 }
@@ -571,6 +591,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 	const runListFeedResponder = config.runListFeedResponder
 	const readHealth = config.readHealth
 	const readRunDiagnostics = config.readRunDiagnostics
+	const readWriteCapableStartedById = config.readWriteCapableStartedById
 
 	// The leaf set the two versioned poll endpoints share; each named handler accepts the subset it directly uses, so the superset is assignable structurally.
 	const versionedDependencies = {
@@ -599,7 +620,7 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 		if (request.method === 'GET') {
 			if (pathname === '/api/config') return json(renderConfig(guildConfig, deployment, config.tools, config.build))
 			if (pathname === '/api/health') return jsonNoStore(readHealth())
-			if (pathname === '/api/queue') return handleGetQueue(taskQueue, readRunMetaById)
+			if (pathname === '/api/queue') return handleGetQueue(taskQueue, readRunMetaById, readWriteCapableStartedById)
 			if (pathname === '/api/settings') return handleGetSettings(readProjectSettings)
 			if (pathname === '/api/run/flow') return handleActiveRunFlow(readRunSnapshot, readRunSnapshotStats, flowFeedResponder, runSubmission, url.searchParams)
 			if (pathname === '/api/run') return handleActiveRun(readRunSnapshot, readRunSnapshotStats, readRunPlanById, runCheckpointExists, readHealth, runSubmission, runState)
@@ -670,6 +691,10 @@ export function createRequestHandler(config: RequestHandlerConfig, serveStatic: 
 				if (rest !== undefined && rest.endsWith('/requeue')) {
 					const itemId = rest.slice(0, rest.length - '/requeue'.length)
 					if (itemId !== '' && !itemId.includes('/')) return handleRequeueQueueItem(taskQueue, itemId)
+				}
+				if (rest !== undefined && rest.endsWith('/defer')) {
+					const itemId = rest.slice(0, rest.length - '/defer'.length)
+					if (itemId !== '' && !itemId.includes('/')) return handleDeferQueueItem(taskQueue, itemId)
 				}
 				if (rest !== undefined && rest.endsWith('/terminate')) {
 					const itemId = rest.slice(0, rest.length - '/terminate'.length)

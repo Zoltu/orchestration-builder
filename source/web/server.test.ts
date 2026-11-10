@@ -3,7 +3,7 @@ import { createWebHumanBackend, type WebHumanBackend } from '../executor/human-b
 import { createInterruptChannel, createInterruptQueue, type InterruptChannel } from '../executor/interrupts.ts'
 import { createOperatorPauseChannel } from '../executor/operator-pause.ts'
 import { createRunState } from '../executor/run-state.ts'
-import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRunSubmission, createTerminatePausedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
+import { createReadPauseStateById, createReadWriteCapableStartedById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createResumeYieldedRun, createRunSubmission, createTerminatePausedRun, type ResumeRun, type RunSubmission, type StartRun } from '../executor/run-submission.ts'
 import { createTaskQueue, type QueueItemView, type QueueView } from '../executor/queue/index.ts'
 import type { RunCheckpoint } from '../executor/checkpoint.ts'
 import { createListCurrentRunIds, type ListRunIds, type ProjectSettings, type ReadProjectSettings, type ReadRunFormat, type WriteProjectSettings, type RunSnapshotRaw, type RunSnapshotStats, type RunSummaryStats } from '../executor/persistence.ts'
@@ -620,8 +620,10 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 	// The queue module references the submission and the submission's settlement hook references the queue; each closure captures the other's binding lazily, exactly as serve.ts composes them.
 	const readCheckpointById = (runId: string): string | null => checkpoints.get(runId) ?? null
 	const readPauseStateById = createReadPauseStateById(readCheckpointById)
+	const readWriteCapableStartedById = createReadWriteCapableStartedById(readCheckpointById)
 	const resumeParkedRun = createResumeParkedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById, deletePauseRequest: () => true })
 	const resumeClarificationRun = createResumeClarificationRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById, deletePauseRequest: () => true })
+	const resumeYieldedRun = createResumeYieldedRun({ runSubmission: submission, readRunMetaById: harnessReadRunMetaById, readCheckpointById, deletePauseRequest: () => true })
 	const terminatePausedRun = createTerminatePausedRun({
 		readRunMetaById: harnessReadRunMetaById,
 		readRunLogEvents: (runId) => runLogs.get(runId) ?? [],
@@ -650,6 +652,8 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 		readRunListSummary,
 		readPauseStateById,
 		resumeParkedRun,
+		readWriteCapableStartedById,
+		resumeYieldedRun,
 		resumeClarificationRun,
 		terminatePausedRun,
 		submitRun: (queued) => {
@@ -707,6 +711,7 @@ function createHandlerHarness(options: { runIdCollides?: boolean, build?: BuildI
 			runListFeedResponder,
 			readHealth: () => options.health ?? { provider: { state: 'unknown', category: 'unknown', since: '2026-01-01T00:00:00.000Z', lastCheckedAt: '2026-01-01T00:00:00.000Z', consecutiveFailures: 0 }, suspendedRunId: null, resumePolicy: null, disposition: null, escalateAfter: null, escalated: false },
 			readRunDiagnostics: options.readRunDiagnostics ?? (() => null),
+			readWriteCapableStartedById,
 		},
 		async (requestPath) => {
 			staticCalls.push(requestPath)
@@ -2546,7 +2551,7 @@ describe('/api/queue', () => {
 	})
 
 	test('PATCH moves a waiting item to a clamped 0-based position in the waiting list', async () => {
-		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('w2'), queueItem('w3'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })] })
+		const { handler } = createHandlerHarness({ initialQueueItems: [queueItem('w1'), queueItem('w2'), queueItem('w3'), queueItem('d1', 'done task', { status: 'done', settledAt: '2026-01-01T00:01:00.000Z' })], canDispatch: () => false })
 		const toFront = await handler(patch('/api/queue/w3', JSON.stringify({ position: 0 })))
 		expect(toFront.status).toBe(200)
 		const moved = await handler(get('/api/queue'))
@@ -2560,7 +2565,7 @@ describe('/api/queue', () => {
 	})
 
 	test('PATCH applies an edit and a reorder as one queue-module write, and an empty patch writes nothing', async () => {
-		const { handler, queue } = createHandlerHarness({ initialQueueItems: [queueItem('w1', 'original text'), queueItem('w2')] })
+		const { handler, queue } = createHandlerHarness({ initialQueueItems: [queueItem('w1', 'original text'), queueItem('w2')], canDispatch: () => false })
 		const edited = await handler(patch('/api/queue/w2', JSON.stringify({ task: 'edited text', position: 0 })))
 		expect(edited.status).toBe(200)
 		expect(queue.writes.length).toBe(1)
@@ -3809,5 +3814,149 @@ describe('provider failure detail exposure', () => {
 		expect(await diagnosticsResponse.text()).toContain('SECRET PROVIDER BODY')
 		const rawLog = await handler(get(`/api/runs/${runId}/log`))
 		expect(await rawLog.text()).toContain('SECRET PROVIDER BODY')
+	})
+})
+
+describe('queue yielded and write-state HTTP behavior', () => {
+	const OPERATOR_PAUSE = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+
+	function operatorPausedMeta(runId: string): RunMeta {
+		return { runId, guildPath: 'guild', task: 'paused task', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause: OPERATOR_PAUSE }
+	}
+
+	function checkpointFor(runId: string, writeCapableStarted?: true): RunCheckpoint {
+		const checkpoint = resumeCheckpoint(runId)
+		if (writeCapableStarted === true) checkpoint.writeCapableStarted = true
+		return checkpoint
+	}
+
+	test('GET /api/queue projects yielded and the checkpoint write state for active and suspended items', async () => {
+		const activeRun = 'run-20260101-000100'
+		const suspendedRun = 'run-20260101-000101'
+		const missingRun = 'run-20260101-000102'
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('a1', 'active task', { status: 'active', runId: activeRun }),
+				queueItem('s1', 'paused task', { status: 'suspended', runId: suspendedRun, suspendedAt: OPERATOR_PAUSE.pausedAt, yielded: true }),
+				queueItem('m1', 'unknown task', { status: 'suspended', runId: missingRun, suspendedAt: OPERATOR_PAUSE.pausedAt }),
+			],
+			initialCheckpoints: new Map([
+				[activeRun, JSON.stringify(checkpointFor(activeRun, true))],
+				[suspendedRun, JSON.stringify(checkpointFor(suspendedRun))],
+			]),
+			initialMetas: new Map([[suspendedRun, JSON.stringify(operatorPausedMeta(suspendedRun))]]),
+		})
+
+		const response = await handler(get('/api/queue'))
+		const body = await response.json() as Array<Record<string, unknown>>
+
+		expect(body[0]).toMatchObject({ id: 'a1', writeCapableStarted: true })
+		expect(body[1]).toMatchObject({ id: 's1', yielded: true, writeCapableStarted: false, pause: OPERATOR_PAUSE })
+		expect(body[2]).toMatchObject({ id: 'm1', writeCapableStarted: null })
+	})
+
+	test('GET /api/queue omits writeCapableStarted on waiting and done items', async () => {
+		const doneRun = 'run-20260101-000103'
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('w1', 'waiting task'),
+				queueItem('d1', 'done task', { status: 'done', runId: doneRun, settledAt: OPERATOR_PAUSE.pausedAt }),
+			],
+			initialCheckpoints: new Map([[doneRun, JSON.stringify(checkpointFor(doneRun, true))]]),
+		})
+
+		const response = await handler(get('/api/queue'))
+		const body = await response.json() as Array<Record<string, unknown>>
+		const [waiting, done] = body
+
+		expect(waiting).toBeDefined()
+		expect(done).toBeDefined()
+		if (waiting === undefined || done === undefined) throw new Error('expected waiting and done queue items')
+		expect('writeCapableStarted' in waiting).toBe(false)
+		expect('writeCapableStarted' in done).toBe(false)
+	})
+
+	test('PATCH reorders an operator-paused pre-write suspended item among the waiting items', async () => {
+		const runId = 'run-20260101-000110'
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('s1', 'paused task', { status: 'suspended', runId, suspendedAt: OPERATOR_PAUSE.pausedAt }),
+				queueItem('w1', 'one'),
+				queueItem('w2', 'two'),
+			],
+			initialCheckpoints: new Map([[runId, JSON.stringify(checkpointFor(runId))]]),
+			initialMetas: new Map([[runId, JSON.stringify(operatorPausedMeta(runId))]]),
+			canDispatch: () => false,
+		})
+
+		const response = await handler(patch('/api/queue/s1', JSON.stringify({ position: 1 })))
+		expect(response.status).toBe(200)
+		const queue = await handler(get('/api/queue'))
+		expect((await queue.json() as Array<{ id: string }>).map((item) => item.id)).toEqual(['w1', 's1', 'w2'])
+	})
+
+	test('POST /api/queue/:id/defer moves a suspended pre-write item to the end of the run order', async () => {
+		const runId = 'run-20260101-000111'
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('s1', 'paused task', { status: 'suspended', runId, suspendedAt: OPERATOR_PAUSE.pausedAt }),
+				queueItem('w1', 'one'),
+				queueItem('w2', 'two'),
+			],
+			initialCheckpoints: new Map([[runId, JSON.stringify(checkpointFor(runId))]]),
+			initialMetas: new Map([[runId, JSON.stringify(operatorPausedMeta(runId))]]),
+			canDispatch: () => false,
+		})
+
+		const response = await handler(post('/api/queue/s1/defer'))
+		expect(response.status).toBe(200)
+		expect(await response.json()).toMatchObject({ id: 's1' })
+		const queue = await handler(get('/api/queue'))
+		expect((await queue.json() as Array<{ id: string }>).map((item) => item.id)).toEqual(['w1', 'w2', 's1'])
+	})
+
+	test('reorder and defer refuse a post-write suspended item with 409', async () => {
+		const runId = 'run-20260101-000112'
+		const { handler } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('s1', 'paused task', { status: 'suspended', runId, suspendedAt: OPERATOR_PAUSE.pausedAt }),
+				queueItem('w1', 'one'),
+			],
+			initialCheckpoints: new Map([[runId, JSON.stringify(checkpointFor(runId, true))]]),
+			initialMetas: new Map([[runId, JSON.stringify(operatorPausedMeta(runId))]]),
+			canDispatch: () => false,
+		})
+
+		const reorder = await handler(patch('/api/queue/s1', JSON.stringify({ position: 0 })))
+		expect(reorder.status).toBe(409)
+		expect(await reorder.json()).toEqual({ ok: false, error: 'status_forbidden' })
+		const defer = await handler(post('/api/queue/s1/defer'))
+		expect(defer.status).toBe(409)
+		expect(await defer.json()).toEqual({ ok: false, error: 'status_forbidden' })
+	})
+
+	test('POST /api/runs/:id/resume yields a pre-write operator pause with work ahead and answers 202', async () => {
+		const runId = 'run-20260101-000120'
+		const { handler, submission, queue } = createHandlerHarness({
+			initialQueueItems: [
+				queueItem('w1', 'work ahead'),
+				queueItem('s1', 'paused task', { status: 'suspended', runId, suspendedAt: OPERATOR_PAUSE.pausedAt }),
+			],
+			initialCheckpoints: new Map([[runId, JSON.stringify(checkpointFor(runId))]]),
+			initialMetas: new Map([[runId, JSON.stringify(operatorPausedMeta(runId))]]),
+			canDispatch: () => false,
+		})
+		submission.adoptOperatorPausedRun(runId)
+
+		const response = await handler(post(`/api/runs/${runId}/resume`, JSON.stringify({ note: 'wait for the queue' })))
+
+		expect(response.status).toBe(202)
+		expect(await response.json()).toEqual({ ok: true, runId, queued: true })
+		expect(submission.pausedRunId()).toBeUndefined()
+		const item = queue.snapshot().items.find((entry) => entry.id === 's1')
+		expect(item?.status).toBe('suspended')
+		expect(item?.yielded).toBe(true)
+		const stored = JSON.parse(queue.store.read() ?? '{}') as { items: Array<Record<string, unknown>> }
+		expect(stored.items.find((entry) => entry.id === 's1')?.resumeNote).toBe('wait for the queue')
 	})
 })

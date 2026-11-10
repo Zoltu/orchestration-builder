@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { backlogCount, deriveQueuedItems, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusLabel, reorderWaitingItems, taskFirstLine } from './static/ts/queue-panel.js'
+import { backlogCount, deriveQueuedItems, deriveRunOrderItems, deriveRunOrderPosition, isOperatorPausedItem, isPausedPostWrite, isPausedPreWrite, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusLabel, queueStatusText, reorderRunOrderItems, runOrderHint, taskFirstLine, writeStateLabel } from './static/ts/queue-panel.js'
 
 // The fixture shape below mirrors the queue item's wire shape (docs/queueing.md "The queue: storage, item model, state machine") the tests build against, pulled off the module's API so the fixtures are checked against the module's own QueueItemLike, mirroring the sibling flow-view.test.ts convention.
 type QueueItemLike = Parameters<typeof queueItemPrimaryText>[0]
@@ -50,10 +50,23 @@ describe('isQueueItemLike', () => {
 		expect(isQueueItemLike({ ...item(), context: ['not', 'a', 'string'] })).toBe(false)
 		expect(isQueueItemLike({ ...item(), assistantFallback: null })).toBe(false)
 	})
+
+	test('accepts only the yielded true marker on suspended or active rows, and a boolean or null write state', () => {
+		expect(isQueueItemLike(item({ status: 'suspended', yielded: true, writeCapableStarted: false }))).toBe(true)
+		expect(isQueueItemLike(item({ status: 'active', yielded: true, writeCapableStarted: true }))).toBe(true)
+		expect(isQueueItemLike(item({ status: 'active', writeCapableStarted: true }))).toBe(true)
+		expect(isQueueItemLike(item({ status: 'active', writeCapableStarted: null }))).toBe(true)
+		expect(isQueueItemLike(item({ status: 'waiting', writeCapableStarted: undefined }))).toBe(true)
+		expect(isQueueItemLike({ ...item(), yielded: false })).toBe(false)
+		expect(isQueueItemLike({ ...item(), yielded: 'yes' })).toBe(false)
+		expect(isQueueItemLike({ ...item({ status: 'waiting' }), yielded: true })).toBe(false)
+		expect(isQueueItemLike({ ...item({ status: 'needs_input' }), yielded: true })).toBe(false)
+		expect(isQueueItemLike({ ...item(), writeCapableStarted: 'no' })).toBe(false)
+	})
 })
 
 describe('deriveQueuedItems', () => {
-	test('groups the polled items into the four queued groups in display order and drops the settled and malformed ones', () => {
+	test('groups the polled items into the queued groups in display order and drops the settled and malformed ones', () => {
 		const queued = deriveQueuedItems([
 			item({ id: 'a', status: 'done', settledAt: '2026-01-01T00:01:00.000Z' }),
 			item({ id: 'b' }),
@@ -64,13 +77,27 @@ describe('deriveQueuedItems', () => {
 			item({ id: 'f' }),
 		])
 		expect(queued.suspended).toEqual([])
-		expect(queued.waiting.map((entry) => entry.id)).toEqual(['b', 'f'])
+		expect(queued.runOrder.map((entry) => entry.id)).toEqual(['b', 'f'])
 		expect(queued.active.map((entry) => entry.id)).toEqual(['d'])
 		expect(queued.needsInput.map((entry) => entry.id)).toEqual(['c'])
 	})
 
-	test('an empty queue yields four empty groups', () => {
-		expect(deriveQueuedItems([])).toEqual({ suspended: [], waiting: [], active: [], needsInput: [] })
+	test('an empty queue yields every empty group', () => {
+		expect(deriveQueuedItems([])).toEqual({ suspended: [], runOrder: [], active: [], needsInput: [] })
+	})
+
+	test('distinguishes priority suspended rows from pre-write operator pauses in the run order', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const queued = deriveQueuedItems([
+			item({ id: 'waiting' }),
+			item({ id: 'provider', status: 'suspended', runId: 'run-provider' }),
+			item({ id: 'pre', status: 'suspended', runId: 'run-pre', pause, writeCapableStarted: false }),
+			item({ id: 'post', status: 'suspended', runId: 'run-post', pause, writeCapableStarted: true }),
+			item({ id: 'unknown', status: 'suspended', runId: 'run-unknown', pause, writeCapableStarted: null }),
+			item({ id: 'yielded', status: 'suspended', runId: 'run-yielded', pause, yielded: true, writeCapableStarted: false }),
+		])
+		expect(queued.suspended.map((entry) => entry.id)).toEqual(['provider', 'post', 'unknown'])
+		expect(queued.runOrder.map((entry) => entry.id)).toEqual(['waiting', 'pre', 'yielded'])
 	})
 
 	test('a parked item keeps its question, context, and assistant fallback through the guard and projection', () => {
@@ -115,6 +142,19 @@ describe('queueStatusLabel', () => {
 	})
 })
 
+describe('queueStatusText', () => {
+	test('a yielded suspended pause reads queued before writing, while an active yielded marker keeps the normal running label', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		expect(queueStatusText(item({ status: 'suspended', runId: 'run-s', pause, yielded: true, writeCapableStarted: false }), 'operator')).toBe('queued before writing')
+		expect(queueStatusText(item({ status: 'active', runId: 'run-s', pause, yielded: true, writeCapableStarted: false }), 'none')).toBe('running')
+	})
+
+	test('a non-yielded suspended row keeps its pause label', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		expect(queueStatusText(item({ status: 'suspended', runId: 'run-s', pause, writeCapableStarted: false }), 'operator')).toBe('paused')
+	})
+})
+
 describe('taskFirstLine', () => {
 	test('keeps a short first line verbatim and caps a long one at a word boundary', () => {
 		expect(taskFirstLine('fix the parser bug\nsecond line')).toBe('fix the parser bug')
@@ -145,22 +185,117 @@ describe('queueItemPrimaryText', () => {
 	})
 })
 
-describe('deriveReorderPosition', () => {
-	test('returns the target waiting index excluding the dragged item, null for a self-drop', () => {
-		const items = [item({ id: 'a' }), item({ id: 'active', status: 'active' }), item({ id: 'b' }), item({ id: 'c' })]
-		expect(deriveReorderPosition(items, 'a', 'b')).toBe(0)
-		expect(deriveReorderPosition(items, 'a', 'c')).toBe(1)
-		expect(deriveReorderPosition(items, 'b', 'b')).toBeNull()
-		expect(deriveReorderPosition(items, 'b', 'missing')).toBeNull()
+const operatorPause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+
+describe('run-order write-state helpers', () => {
+	test('an operator pause is identified from the item pause record, never from a provider suspension or a non-suspended row', () => {
+		expect(isOperatorPausedItem(item({ status: 'suspended', runId: 'run-s', pause: operatorPause }))).toBe(true)
+		expect(isOperatorPausedItem(item({ status: 'suspended', runId: 'run-s' }))).toBe(false)
+		expect(isOperatorPausedItem(item({ status: 'waiting', pause: operatorPause }))).toBe(false)
+		expect(isOperatorPausedItem(item({ status: 'active', runId: 'run-a', pause: operatorPause }))).toBe(false)
+	})
+
+	test('pre-write and post-write require an operator pause plus a known write state; unknown and provider rows match neither', () => {
+		const pre = item({ status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false })
+		const post = item({ status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: true })
+		const unknown = item({ status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: null })
+		const provider = item({ status: 'suspended', runId: 'run-s', writeCapableStarted: false })
+		expect(isPausedPreWrite(pre)).toBe(true)
+		expect(isPausedPreWrite(post)).toBe(false)
+		expect(isPausedPreWrite(unknown)).toBe(false)
+		expect(isPausedPreWrite(provider)).toBe(false)
+		expect(isPausedPostWrite(post)).toBe(true)
+		expect(isPausedPostWrite(pre)).toBe(false)
+		expect(isPausedPostWrite(provider)).toBe(false)
+	})
+
+	test('a yielded marker with a null write state stays out of the pre-write run order', () => {
+		const yieldedUnknown = item({ status: 'suspended', runId: 'run-y', pause: operatorPause, yielded: true, writeCapableStarted: null })
+		expect(isPausedPreWrite(yieldedUnknown)).toBe(false)
+		expect(writeStateLabel(yieldedUnknown)).toBe('Write state unknown')
+		expect(deriveRunOrderItems([yieldedUnknown])).toEqual([])
+		expect(deriveQueuedItems([yieldedUnknown]).suspended.map((entry) => entry.id)).toEqual(['item-1'])
+	})
+
+	test('writeStateLabel reports the state only for active and suspended rows, with unknown for null or absent', () => {
+		expect(writeStateLabel(item({ status: 'active', writeCapableStarted: false }))).toBe('Pre-write')
+		expect(writeStateLabel(item({ status: 'suspended', writeCapableStarted: true }))).toBe('Post-write')
+		expect(writeStateLabel(item({ status: 'suspended', writeCapableStarted: null }))).toBe('Write state unknown')
+		expect(writeStateLabel(item({ status: 'active' }))).toBe('Write state unknown')
+		expect(writeStateLabel(item({ status: 'waiting' }))).toBeNull()
+		expect(writeStateLabel(item({ status: 'needs_input' }))).toBeNull()
 	})
 })
 
-describe('reorderWaitingItems', () => {
-	test('moves the dragged item to the clamped position and keeps every other item in place', () => {
-		const items = [item({ id: 'a' }), item({ id: 'active', status: 'active' }), item({ id: 'b' }), item({ id: 'c' })]
-		expect(reorderWaitingItems(items, 'a', 5).map((entry) => entry.id)).toEqual(['b', 'active', 'c', 'a'])
-		expect(reorderWaitingItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['b', 'active', 'a', 'c'])
-		expect(reorderWaitingItems(items, 'active', 0).map((entry) => entry.id)).toEqual(['a', 'active', 'b', 'c'])
+describe('deriveRunOrderItems', () => {
+	test('keeps waiting and operator-paused pre-write suspended rows in file order, including a yielded pause', () => {
+		const items = [
+			item({ id: 'waiting-a' }),
+			item({ id: 'active', status: 'active', runId: 'run-a' }),
+			item({ id: 'provider', status: 'suspended', runId: 'run-p' }),
+			item({ id: 'pre', status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false }),
+			item({ id: 'waiting-b' }),
+			item({ id: 'post', status: 'suspended', runId: 'run-post', pause: operatorPause, writeCapableStarted: true }),
+			item({ id: 'unknown', status: 'suspended', runId: 'run-u', pause: operatorPause, writeCapableStarted: null }),
+			item({ id: 'yielded', status: 'suspended', runId: 'run-y', pause: operatorPause, yielded: true, writeCapableStarted: false }),
+		]
+		expect(deriveRunOrderItems(items).map((entry) => entry.id)).toEqual(['waiting-a', 'pre', 'waiting-b', 'yielded'])
+	})
+})
+
+describe('deriveRunOrderPosition', () => {
+	test('returns the target index among the run-order items excluding the dragged row, or null when either row is not orderable', () => {
+		const items = [
+			item({ id: 'a' }),
+			item({ id: 'active', status: 'active' }),
+			item({ id: 'pre', status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false }),
+			item({ id: 'b' }),
+			item({ id: 'post', status: 'suspended', runId: 'run-post', pause: operatorPause, writeCapableStarted: true }),
+			item({ id: 'c' }),
+		]
+		expect(deriveRunOrderPosition(items, 'a', 'pre')).toBe(0)
+		expect(deriveRunOrderPosition(items, 'a', 'c')).toBe(2)
+		expect(deriveRunOrderPosition(items, 'pre', 'b')).toBe(1)
+		expect(deriveRunOrderPosition(items, 'a', 'a')).toBeNull()
+		expect(deriveRunOrderPosition(items, 'a', 'active')).toBeNull()
+		expect(deriveRunOrderPosition(items, 'active', 'b')).toBeNull()
+		expect(deriveRunOrderPosition(items, 'a', 'missing')).toBeNull()
+	})
+})
+
+describe('reorderRunOrderItems', () => {
+	test('moves the dragged orderable row among the run order while non-orderable rows keep their file positions', () => {
+		const items = [
+			item({ id: 'a' }),
+			item({ id: 'active', status: 'active' }),
+			item({ id: 'pre', status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false }),
+			item({ id: 'b' }),
+			item({ id: 'post', status: 'suspended', runId: 'run-post', pause: operatorPause, writeCapableStarted: true }),
+			item({ id: 'c' }),
+		]
+		expect(reorderRunOrderItems(items, 'a', 5).map((entry) => entry.id)).toEqual(['pre', 'active', 'b', 'c', 'post', 'a'])
+		expect(reorderRunOrderItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['pre', 'active', 'a', 'b', 'post', 'c'])
+		expect(reorderRunOrderItems(items, 'pre', 0).map((entry) => entry.id)).toEqual(['pre', 'active', 'a', 'b', 'post', 'c'])
+		expect(reorderRunOrderItems(items, 'active', 0)).toBe(items)
+		expect(reorderRunOrderItems(items, 'post', 0)).toBe(items)
+		expect(reorderRunOrderItems(items, 'missing', 0)).toBe(items)
+	})
+})
+
+describe('runOrderHint', () => {
+	test('names the first row and counts the runnable tasks ahead of every later row', () => {
+		const items = [
+			item({ id: 'a' }),
+			item({ id: 'active', status: 'active' }),
+			item({ id: 'pre', status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false }),
+			item({ id: 'b' }),
+			item({ id: 'post', status: 'suspended', runId: 'run-post', pause: operatorPause, writeCapableStarted: true }),
+		]
+		expect(runOrderHint(item({ id: 'a' }), items)).toBe('First in run order')
+		expect(runOrderHint(item({ id: 'pre', status: 'suspended', runId: 'run-s', pause: operatorPause, writeCapableStarted: false }), items)).toBe('1 runnable task ahead')
+		expect(runOrderHint(item({ id: 'b' }), items)).toBe('2 runnable tasks ahead')
+		expect(runOrderHint(item({ id: 'active', status: 'active' }), items)).toBeNull()
+		expect(runOrderHint(item({ id: 'post', status: 'suspended', runId: 'run-post', pause: operatorPause, writeCapableStarted: true }), items)).toBeNull()
 	})
 })
 
@@ -189,26 +324,28 @@ describe('suspended queue rows', () => {
 			item({ id: 'needs', status: 'needs_input', runId: 'run-n' }),
 		])
 		expect(queued.suspended.map((entry) => entry.id)).toEqual(['suspended'])
-		expect(queued.waiting.map((entry) => entry.id)).toEqual(['waiting'])
 		expect(queued.needsInput.map((entry) => entry.id)).toEqual(['needs'])
 	})
 
-	test('counts a suspended pause in the backlog because it blocks dispatch', () => {
+	test('counts a suspended pause, including a yielded pause, in the backlog because it blocks dispatch', () => {
 		expect(backlogCount([
 			item({ id: 'a' }),
 			item({ id: 'b', status: 'suspended', runId: 'run-b' }),
 			item({ id: 'c', status: 'active' }),
-		])).toBe(2)
+			item({ id: 'd', status: 'suspended', runId: 'run-d', pause: operatorPause, yielded: true, writeCapableStarted: false }),
+		])).toBe(3)
 	})
 
-	test('a suspended row is not a reorder source or target', () => {
+	test('a provider suspended row is not a reorder source or target, while a pre-write pause is', () => {
 		const items = [
 			item({ id: 'a', status: 'waiting' }),
 			item({ id: 's', status: 'suspended', runId: 'run-s' }),
+			item({ id: 'p', status: 'suspended', runId: 'run-p', pause: operatorPause, writeCapableStarted: false }),
 			item({ id: 'b', status: 'waiting' }),
 		]
-		expect(deriveReorderPosition(items, 'a', 's')).toBeNull()
-		expect(reorderWaitingItems(items, 's', 0)).toBe(items)
-		expect(reorderWaitingItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['b', 's', 'a'])
+		expect(deriveRunOrderPosition(items, 'a', 's')).toBeNull()
+		expect(reorderRunOrderItems(items, 's', 0)).toBe(items)
+		expect(deriveRunOrderPosition(items, 'a', 'p')).toBe(0)
+		expect(reorderRunOrderItems(items, 'a', 1).map((entry) => entry.id)).toEqual(['p', 's', 'a', 'b'])
 	})
 })

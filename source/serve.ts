@@ -11,7 +11,7 @@ import { createFlowFeedResponder } from './web/static/ts/flow-feed/index.js'
 import { createRunListFeedResponder } from './web/static/ts/run-list-feed/index.js'
 import { createStreamHub } from './web/stream-hub.js'
 import { createTaskSummarizer, shouldWriteCompletionSummary, type TaskSummarizer } from './summarize.js'
-import { writeFileAtomically, applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createCompletionHealthProbe, createDeleteCheckpoint, createDeletePauseRequest, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createOperatorPauseChannel, createOperatorPauseQueue, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseRequestById, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunLogTail, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createResumeParkedRun, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createStateInvalidationChannel, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWritePauseRequest, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, HEALTH_PROBE_TIMEOUT_MS, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type OperatorPauseChannel, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
+import { writeFileAtomically, applyDeploymentOverride, applyLogLevel, createAppendLog, createBunSubprocessRunner, createCompletionHealthProbe, createDeleteCheckpoint, createDeletePauseRequest, createDeltaChannel, createDockerSecretReader, createGuildLoader, createInterruptChannel, createInterruptQueue, createLlmCaller, createLlmFetch, createListCurrentRunIds, createListRunIds, createModelInfoProbe, createObservedLlmCaller, createOperatorPauseChannel, createOperatorPauseQueue, createProviderAutoResumeCoordinator, createProviderRecovery, createReadPauseRequestById, createReadPauseStateById, createReadProjectDoc, createReadProjectSettings, createReadQueueText, createReadRunCheckpointById, createReadRunFormat, createReadRunLogTextFrom, createReadRunLogTail, createReadRunMetaById, createReadRunMetaTextById, createReadRunPlanById, createReadRunSnapshotById, createReadRunSnapshotStats, createReadRunSummaryById, createReadTaskThreadSummaryTextById, createWriteTaskThreadSummaryTextById, createReadRunSummaryStats, createReadWorkspaceGitState, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createResumeParkedRun, createResumeYieldedRun, createReadWriteCapableStartedById, createRoleSnapshotStore, createRunBaseTracker, createRunCheckpointExists, createRunDirectory, createRunDirectoryExists, createRunState, createRunSubmission, createSleep, createStateInvalidationChannel, createTaskQueue, createTerminatePausedRun, createTimeoutScheduler, createToolPlatform, createWebHumanBackend, createWriteCheckpoint, createWriteMeta, createWritePauseRequest, createWriteProjectSettings, createWriteQueueText, createWriteRunSummary, ensureOrchestrationGitExcluded, entryFrameLogLevel, generateRunId, HEALTH_PROBE_TIMEOUT_MS, llmUsagePayload, LOG_FILE_NAME, MODEL_PROBE_TIMEOUT_MS, nodeGitExcludeFilesystem, parseModelInfo, reconcileRunsOnStartup, isRunQueuedForResume, resolveDeploymentConfig, resolveDeploymentOverride, resolveKagiApiKey, resolveSecret, resumeExecutor, runExecutor, validateDeploymentFileConfig, validateDeploymentRoleReferences, validateHandlerRolesAreReadOnly, ConfigurationError, ValidationError, type AppendLog, type DeltaChannel, type ExecutorDependencies, type InterruptChannel, type InvolvementLevel, type LoadedGuild, type LlmCaller, type LogLevel, type ModelApiProbe, type OperatorPauseChannel, type ProviderHealth, type ReadRunLogEvents, type ResumeRun, type RunCheckpoint, type StartRun, type WebHumanBackend } from './executor/index.js'
 import { parseLogEvents } from './run-log/parse.js'
 import { createAppendThreadJournal, createAppendThreadJournalCursor, createReadRunLogStat, createReadThreadJournalText, createTaskThreadCoreReader, createTaskThreadReader, createTaskThreadSummarizer, createThreadJournalStore, createWriteThreadJournalText, type ThreadJournalStore } from './task-thread/index.js'
 
@@ -435,6 +435,7 @@ async function serve(): Promise<void> {
 	// The checkpoint reader serves startup reconciliation, the explicit error-or-suspended resume submission, and both queue answer resumes alike; the exists-check is the cheap stat-only variant the run view's resumable flag reads.
 	const listCurrentRunIds = createListCurrentRunIds(listRunIds, readRunFormat)
 	const readPauseStateById = createReadPauseStateById(readRunCheckpointById)
+	const readWriteCapableStartedById = createReadWriteCapableStartedById(readRunCheckpointById)
 	const readPauseRequestById = createReadPauseRequestById(runsBaseDir)
 	const writePauseRequest = createWritePauseRequest(runsBaseDir)
 	const runCheckpointExists = createRunCheckpointExists(runsBaseDir)
@@ -453,6 +454,8 @@ async function serve(): Promise<void> {
 	// The queue's two same-run answer resumes compose the submission layer over the same meta/checkpoint readers the explicit error-or-suspended resume uses.
 	const resumeParkedRun = createResumeParkedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
 	const resumeClarificationRun = createResumeClarificationRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
+	// The yielded operator pause resumes under its own run id without re-activating its item, because the scheduler already wrote the yielded active marker.
+	const resumeYieldedRun = createResumeYieldedRun({ runSubmission, readRunMetaById, readCheckpointById: readRunCheckpointById, deletePauseRequest: createDeletePauseRequest(runsBaseDir) })
 	// The operator-termination path marks the parked or suspended run interrupted, logs the action, and removes the checkpoint so the run can never be answered or resumed.
 	const terminatePausedRun = createTerminatePausedRun({
 		readRunMetaById,
@@ -471,8 +474,10 @@ async function serve(): Promise<void> {
 		listRunIds,
 		readRunListSummary,
 		readPauseStateById,
+		readWriteCapableStartedById,
 		resumeParkedRun,
 		resumeClarificationRun,
+		resumeYieldedRun,
 		terminatePausedRun,
 		submitRun: (submission) => runSubmission.submit(submission.task, submission.effort, submission.involvement, submission.logLevel, submission.continuation),
 		hasActiveRun: () => runSubmission.activeRunId() !== undefined,
@@ -532,6 +537,7 @@ async function serve(): Promise<void> {
 		readRunFormat,
 		readPauseRequestById,
 		deletePauseRequest: createDeletePauseRequest(runsBaseDir),
+		isRunQueuedForResume: (runId) => isRunQueuedForResume(taskQueue.read().items, runId),
 		writeMetaFor: (runId) => createWriteMeta(runId, runsBaseDir),
 		resume: (checkpoint: RunCheckpoint) => runSubmission.resume(checkpoint),
 	})
@@ -604,6 +610,7 @@ async function serve(): Promise<void> {
 		flowFeedResponder,
 		runListFeedResponder,
 		readRunDiagnostics,
+		readWriteCapableStartedById,
 	})
 	console.log(`Web UI ready: http://localhost:${webServer.port}`)
 

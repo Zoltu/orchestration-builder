@@ -7,6 +7,7 @@ import type { VersionStatus } from './orchestration-version.ts'
 import type { RunMeta } from './types.ts'
 import type { PauseIntent } from './operator-pause.ts'
 import { defined } from './test-fixtures.ts'
+import { isRunQueuedForResume, type QueueItemView } from './queue/model.ts'
 
 function runningMeta(runId: string, startTime: string): RunMeta {
 	return {
@@ -186,7 +187,7 @@ interface Harness {
 }
 
 // All leaves are in-memory fakes keyed by run id: metas and checkpoints are raw file text (or absent), and writeMetaFor records per run.
-function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined; format?: VersionStatus; pauseRequest?: PauseIntent | null | undefined }>): Harness {
+function makeHarness(runs: Record<string, { metaText?: string | undefined; checkpointText?: string | undefined; format?: VersionStatus; pauseRequest?: PauseIntent | null | undefined }>, options: { queuedForResume?: (runId: string) => boolean } = {}): Harness {
 	const resumed: RunCheckpoint[] = []
 	const writtenMetas = new Map<string, RunMeta[]>()
 	const checkpointReads: string[] = []
@@ -216,6 +217,7 @@ function makeHarness(runs: Record<string, { metaText?: string | undefined; check
 			const run = runs[runId]
 			if (run !== undefined) delete run.pauseRequest
 		},
+		isRunQueuedForResume: options.queuedForResume ?? (() => false),
 		writeMetaFor,
 		resume: (checkpoint) => {
 			resumed.push(checkpoint)
@@ -894,5 +896,89 @@ describe('reconcileRunsOnStartup', () => {
 		expect(report.resumedRunId).toBe('run-1')
 		expect(harness.resumed).toEqual([checkpoint])
 		expect(harness.checkpointReads).toEqual(['run-1'])
+	})
+})
+
+describe('yielded operator pauses at boot', () => {
+	test('a yielded operator pause is not reported as a priority pause', () => {
+		const runId = 'run-20260101-000001'
+		const harness = makeHarness(
+			{ [runId]: { metaText: JSON.stringify(operatorSuspendedMeta(runId)), checkpointText: JSON.stringify(checkpointFor(runId, '2026-01-01T00:00:00.000Z')) } },
+			{ queuedForResume: (candidate) => candidate === runId },
+		)
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([])
+		expect(harness.writtenMetas.size).toBe(0)
+	})
+
+	test('an active yielded dispatch marker at boot is not reported as a priority pause', () => {
+		const runId = 'run-20260101-000007'
+		const queueItems: QueueItemView[] = [{ id: 'item-1', task: 'paused task', status: 'active', runId, queuedAt: '2026-01-01T00:00:00.000Z', yielded: true }]
+		expect(isRunQueuedForResume(queueItems, runId)).toBe(true)
+		const harness = makeHarness(
+			{ [runId]: { metaText: JSON.stringify(operatorSuspendedMeta(runId)), checkpointText: JSON.stringify(checkpointFor(runId, '2026-01-01T00:00:00.000Z')) } },
+			{ queuedForResume: (candidate) => isRunQueuedForResume(queueItems, candidate) },
+		)
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.suspendedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([])
+	})
+
+	test('a yielded operator pause does not supersede a resumable running run', () => {
+		const yieldedRunId = 'run-20260101-000002'
+		const runningRunId = 'run-20260101-000003'
+		const runningCheckpoint = checkpointFor(runningRunId, '2026-01-01T00:10:00.000Z')
+		const harness = makeHarness(
+			{
+				[yieldedRunId]: { metaText: JSON.stringify(operatorSuspendedMeta(yieldedRunId)), checkpointText: JSON.stringify(checkpointFor(yieldedRunId, '2026-01-01T00:00:00.000Z')) },
+				[runningRunId]: { metaText: JSON.stringify(runningMeta(runningRunId, '2026-01-01T00:10:00.000Z')), checkpointText: JSON.stringify(runningCheckpoint) },
+			},
+			{ queuedForResume: (candidate) => candidate === yieldedRunId },
+		)
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.resumedRunId).toBe(runningRunId)
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([])
+		expect(harness.resumed).toEqual([runningCheckpoint])
+	})
+
+	test('a yielded operator pause does not outrank a provider suspension', () => {
+		const yieldedRunId = 'run-20260101-000004'
+		const providerRunId = 'run-20260101-000005'
+		const harness = makeHarness(
+			{
+				[yieldedRunId]: { metaText: JSON.stringify(operatorSuspendedMeta(yieldedRunId)), checkpointText: JSON.stringify(checkpointFor(yieldedRunId, '2026-01-01T00:00:00.000Z')) },
+				[providerRunId]: { metaText: JSON.stringify(suspendedMeta(providerRunId)), checkpointText: JSON.stringify(suspendedCheckpointFor(providerRunId, 'operator')) },
+			},
+			{ queuedForResume: (candidate) => candidate === yieldedRunId },
+		)
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.suspendedRunIds).toEqual([providerRunId])
+		expect(report.operatorPausedRunIds).toEqual([])
+		expect(report.interruptedRunIds).toEqual([])
+	})
+
+	test('a yielded pause whose queue item is missing keeps the normal operator-pause priority', () => {
+		const runId = 'run-20260101-000006'
+		const harness = makeHarness({
+			[runId]: { metaText: JSON.stringify(operatorSuspendedMeta(runId)), checkpointText: JSON.stringify(checkpointFor(runId, '2026-01-01T00:00:00.000Z')) },
+		})
+
+		const report = reconcileRunsOnStartup(harness.dependencies)
+
+		expect(report.operatorPausedRunIds).toEqual([runId])
 	})
 })

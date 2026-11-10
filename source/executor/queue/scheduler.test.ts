@@ -85,9 +85,11 @@ interface QueueSeedItem extends QueueItemView {
 	resumeRunId?: string
 	resumeToolCallId?: string
 	answerId?: string
+	resumeNote?: string
+	yieldedPauseAt?: string
 }
 
-function waitingItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
+function waitingItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
 	return {
 		id: 'item-1',
 		task: 'fix the parser bug',
@@ -120,8 +122,9 @@ function suspendedMeta(runId: string): RunMeta {
 	}
 }
 
-function suspendedItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
-	return waitingItem({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT, ...overrides })
+function suspendedItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
+	const item = waitingItem({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT, ...overrides })
+	return item.yielded === true && item.yieldedPauseAt === undefined ? { ...item, yieldedPauseAt: item.suspendedAt } : item
 }
 
 // Fake run-meta reader over an in-memory record; ids absent from the record read as null (no run directory).
@@ -173,9 +176,11 @@ interface QueueOverOptions {
 	hasSuspendedRun?: () => boolean
 	pausedRunKind?: () => 'provider' | 'operator' | undefined
 	canDispatch?: () => boolean
+	writeStates?: Record<string, boolean | null>
+	resumeYieldedResults?: Array<{ ok: true; runId: string } | { ok: false; error: 'run_in_progress' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found' | 'pause_intent_clear_failed' }>
 }
 
-function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, options: QueueOverOptions = {}): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void; answer: (id: string, answer: string) => Promise<unknown>; resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>; clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> } {
+function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<typeof fakeSubmit>, options: QueueOverOptions = {}): { tick: () => Promise<void>; onRunSettled: (meta: RunMeta) => Promise<void>; observeShutdown: () => void; answer: (id: string, answer: string) => Promise<unknown>; resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }>; clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }>; resumeYieldedCalls: string[]; resumeYieldedNotes: Array<string | undefined> } {
 	const sleep = fakeSleep()
 	const metas = options.metas ?? {}
 	const runList = options.runList ?? fakeRunList()
@@ -183,8 +188,11 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 	const pauseStates = options.pauseStates ?? {}
 	const resumeScript = [...(options.resumeResults ?? [])]
 	const clarificationScript = [...(options.clarificationResumeResults ?? [])]
+	const resumeYieldedScript = [...(options.resumeYieldedResults ?? [])]
 	const resumeCalls: Array<{ runId: string; parkedAnswer: { question: string; answer: string; toolCallId: string } }> = []
 	const clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }> = []
+	const resumeYieldedCalls: string[] = []
+	const resumeYieldedNotes: Array<string | undefined> = []
 	const taskQueue = createTaskQueue({
 		notifyStateChanged: () => {},
 		queueStore: store.store,
@@ -192,6 +200,7 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 		listRunIds: runList.listRunIds,
 		readRunListSummary: runList.readRunListSummary,
 		readPauseStateById: (runId) => pauseStateOf(pauseStates[runId]),
+		readWriteCapableStartedById: (runId) => options.writeStates?.[runId] ?? null,
 		resumeParkedRun: (runId, parkedAnswer) => {
 			resumeCalls.push({ runId, parkedAnswer })
 			return resumeScript.shift() ?? { ok: false, error: 'checkpoint_missing' }
@@ -199,6 +208,11 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 		resumeClarificationRun: (runId, clarificationAnswer) => {
 			clarificationResumeCalls.push({ runId, ...clarificationAnswer })
 			return clarificationScript.shift() ?? { ok: true, runId }
+		},
+		resumeYieldedRun: (runId, note) => {
+			resumeYieldedCalls.push(runId)
+			resumeYieldedNotes.push(note)
+			return resumeYieldedScript.shift() ?? { ok: true, runId }
 		},
 		terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
 		submitRun: submit.submitRun,
@@ -211,10 +225,10 @@ function queueOver(store: ReturnType<typeof fakeQueueStore>, submit: ReturnType<
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
 	})
-	return { tick: () => taskQueue.tick(), onRunSettled: (meta) => taskQueue.onRunSettled(meta), observeShutdown: () => taskQueue.observeShutdown(), answer: (id, answer) => taskQueue.answer(id, answer), resumeCalls, clarificationResumeCalls }
+	return { tick: () => taskQueue.tick(), onRunSettled: (meta) => taskQueue.onRunSettled(meta), observeShutdown: () => taskQueue.observeShutdown(), answer: (id, answer) => taskQueue.answer(id, answer), resumeCalls, clarificationResumeCalls, resumeYieldedCalls, resumeYieldedNotes }
 }
 
-function requireItem(items: readonly QueueItemView[], id: string): QueueItemView {
+function requireItem(items: readonly QueueSeedItem[], id: string): QueueSeedItem {
 	const item = items.find((candidate) => candidate.id === id)
 	if (item === undefined) throw new Error(`expected queue item ${id}`)
 	return item
@@ -323,6 +337,8 @@ describe('createTaskQueue tick — dispatch', () => {
 			listRunIds: runList.listRunIds,
 			readRunListSummary: runList.readRunListSummary,
 			readPauseStateById: () => null,
+			readWriteCapableStartedById: () => null,
+			resumeYieldedRun: () => ({ ok: false, error: 'run_not_resumable' }),
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
@@ -385,6 +401,8 @@ describe('createTaskQueue tick — submission threading', () => {
 			listRunIds: runList.listRunIds,
 			readRunListSummary: runList.readRunListSummary,
 			readPauseStateById: () => null,
+			readWriteCapableStartedById: () => null,
+			resumeYieldedRun: () => ({ ok: false, error: 'run_not_resumable' }),
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
@@ -1732,5 +1750,223 @@ describe('createTaskQueue shutdown gate', () => {
 
 		expect(submit.calls.length).toBe(0)
 		expect(store.writes.length).toBe(0)
+	})
+})
+
+describe('createTaskQueue tick — yielded operator pauses', () => {
+	const OPERATOR_PAUSE = { message: 'The operator paused this run.', pausedAt: SUSPENDED_AT }
+
+	function operatorPausedMeta(runId: string): RunMeta {
+		return { runId, task: 'fix the parser bug', status: 'suspended', startTime: '2026-01-01T00:30:00.000Z', pause: OPERATOR_PAUSE }
+	}
+
+	test('a yielded item at the head resumes its same run and clears the marker after acceptance', async () => {
+		const runId = 'run-20260101-010000'
+		const store = fakeQueueStore([suspendedItem({ id: 's1', runId, yielded: true, resumeNote: 'carry on' })])
+		const submit = fakeSubmit([])
+		const queue = queueOver(store, submit, { metas: { [runId]: operatorPausedMeta(runId) }, hasSuspendedRun: () => false, writeStates: { [runId]: false } })
+
+		await queue.tick()
+
+		expect(queue.resumeYieldedCalls).toEqual([runId])
+		expect(submit.calls.length).toBe(0)
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('active')
+		expect(item.runId).toBe(runId)
+		expect(item.yielded).toBeUndefined()
+		expect(item.resumeNote).toBeUndefined()
+		expect(item.yieldedPauseAt).toBeUndefined()
+	})
+
+	test('waiting work ahead of a yielded item dispatches first, then the yielded run resumes when it reaches the head', async () => {
+		const yieldedRunId = 'run-20260101-020000'
+		const store = fakeQueueStore([
+			waitingItem({ id: 'w1' }),
+			suspendedItem({ id: 's1', runId: yieldedRunId, yielded: true }),
+		])
+		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010000' }])
+		const queue = queueOver(store, submit, { metas: { [yieldedRunId]: operatorPausedMeta(yieldedRunId) }, hasSuspendedRun: () => false })
+
+		await queue.tick()
+
+		expect(submit.calls.length).toBe(1)
+		expect(queue.resumeYieldedCalls).toEqual([])
+		expect(requireItem(store.items(), 'w1').status).toBe('active')
+		expect(requireItem(store.items(), 's1').status).toBe('suspended')
+		expect(requireItem(store.items(), 's1').yielded).toBe(true)
+
+		await queue.onRunSettled(meta({ runId: 'run-20260101-010000' }))
+
+		expect(queue.resumeYieldedCalls).toEqual([yieldedRunId])
+		expect(requireItem(store.items(), 's1').status).toBe('active')
+		expect(requireItem(store.items(), 's1').yielded).toBeUndefined()
+	})
+
+	test('a provider suspension still blocks dispatch and yielded resumption', async () => {
+		const yieldedRunId = 'run-20260101-020000'
+		const store = fakeQueueStore([
+			waitingItem({ id: 'w1' }),
+			suspendedItem({ id: 's1', runId: yieldedRunId, yielded: true }),
+		])
+		const submit = fakeSubmit([])
+		const queue = queueOver(store, submit, {
+			metas: { [yieldedRunId]: operatorPausedMeta(yieldedRunId) },
+			hasSuspendedRun: () => true,
+			pausedRunKind: () => 'provider',
+		})
+
+		await queue.tick()
+
+		expect(submit.calls.length).toBe(0)
+		expect(queue.resumeYieldedCalls).toEqual([])
+		expect(requireItem(store.items(), 's1').status).toBe('suspended')
+		expect(requireItem(store.items(), 's1').yielded).toBe(true)
+	})
+
+	test('boot repair restores a yielded active marker to suspended with its yield when the pause identity matches', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([waitingItem({ id: 's1', status: 'active', runId, yielded: true, resumeNote: 'carry on', yieldedPauseAt: OPERATOR_PAUSE.pausedAt })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: operatorPausedMeta(runId) }, hasActiveRun: () => true })
+
+		await queue.tick()
+
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('suspended')
+		expect(item.runId).toBe(runId)
+		expect(item.yielded).toBe(true)
+	})
+
+	test('boot repair drops the yield when the suspended meta is a provider suspension', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([waitingItem({ id: 's1', status: 'active', runId, yielded: true, resumeNote: 'carry on', yieldedPauseAt: OPERATOR_PAUSE.pausedAt })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: suspendedMeta(runId) }, hasActiveRun: () => true })
+
+		await queue.tick()
+
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('suspended')
+		expect(item.yielded).toBeUndefined()
+		expect(item.resumeNote).toBeUndefined()
+		expect(item.yieldedPauseAt).toBeUndefined()
+	})
+
+	test('boot repair drops the yield when a new operator pause has a different pausedAt', async () => {
+		const runId = 'run-20260101-020000'
+		const newPause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T04:00:00.000Z' }
+		const newPauseMeta: RunMeta = { runId, task: 'fix the parser bug', status: 'suspended', startTime: '2026-01-01T00:30:00.000Z', pause: newPause }
+		const store = fakeQueueStore([waitingItem({ id: 's1', status: 'active', runId, yielded: true, resumeNote: 'carry on', yieldedPauseAt: OPERATOR_PAUSE.pausedAt })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: newPauseMeta }, hasActiveRun: () => true })
+
+		await queue.tick()
+
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('suspended')
+		expect(item.yielded).toBeUndefined()
+		expect(item.resumeNote).toBeUndefined()
+		expect(item.yieldedPauseAt).toBeUndefined()
+	})
+
+	test('suspended yielded repair adopts the current pause time and drops the marker for a different pause or provider suspension', async () => {
+		const runId = 'run-20260101-020000'
+		const oldPauseAt = '2026-01-01T01:00:00.000Z'
+		const newPause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T04:00:00.000Z' }
+		const newPauseMeta: RunMeta = { runId, task: 'fix the parser bug', status: 'suspended', startTime: '2026-01-01T00:30:00.000Z', pause: newPause }
+		const operatorStore = fakeQueueStore([suspendedItem({ id: 's1', runId, suspendedAt: oldPauseAt, yielded: true, resumeNote: 'carry on', yieldedPauseAt: oldPauseAt })])
+		const operatorQueue = queueOver(operatorStore, fakeSubmit([]), { metas: { [runId]: newPauseMeta }, hasActiveRun: () => true })
+
+		await operatorQueue.tick()
+
+		const repaused = requireItem(operatorStore.items(), 's1')
+		expect(repaused.status).toBe('suspended')
+		expect(repaused.suspendedAt).toBe(newPause.pausedAt)
+		expect(repaused.yielded).toBeUndefined()
+		expect(repaused.resumeNote).toBeUndefined()
+		expect(repaused.yieldedPauseAt).toBeUndefined()
+
+		const providerStore = fakeQueueStore([suspendedItem({ id: 's2', runId, suspendedAt: oldPauseAt, yielded: true, resumeNote: 'carry on', yieldedPauseAt: oldPauseAt })])
+		const providerQueue = queueOver(providerStore, fakeSubmit([]), { metas: { [runId]: suspendedMeta(runId) }, hasActiveRun: () => true })
+
+		await providerQueue.tick()
+
+		const suspended = requireItem(providerStore.items(), 's2')
+		expect(suspended.status).toBe('suspended')
+		expect(suspended.suspendedAt).toBe(SUSPENDED_AT)
+		expect(suspended.yielded).toBeUndefined()
+		expect(suspended.resumeNote).toBeUndefined()
+		expect(suspended.yieldedPauseAt).toBeUndefined()
+	})
+
+	test('the scheduler threads the yielded item\u2019s resume note into the same-run resume', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([suspendedItem({ id: 's1', runId, yielded: true, resumeNote: 'wait for the queue' })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: operatorPausedMeta(runId) }, hasSuspendedRun: () => false })
+
+		await queue.tick()
+
+		expect(queue.resumeYieldedCalls).toEqual([runId])
+		expect(queue.resumeYieldedNotes).toEqual(['wait for the queue'])
+	})
+
+	test('boot repair of an active yielded marker reaches the head and resumes the run', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([waitingItem({ id: 's1', status: 'active', runId, yielded: true, yieldedPauseAt: OPERATOR_PAUSE.pausedAt })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: operatorPausedMeta(runId) }, hasSuspendedRun: () => false })
+
+		await queue.tick()
+
+		expect(queue.resumeYieldedCalls).toEqual([runId])
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('active')
+		expect(item.yielded).toBeUndefined()
+	})
+
+	test('a settled suspension does not carry the yield into the new pause', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([waitingItem({ id: 's1', status: 'active', runId, yielded: true })])
+		const queue = queueOver(store, fakeSubmit([]), { metas: { [runId]: suspendedMeta(runId) } })
+
+		await queue.onRunSettled(suspendedMeta(runId))
+
+		const item = requireItem(store.items(), 's1')
+		expect(item.status).toBe('suspended')
+		expect(item.yielded).toBeUndefined()
+	})
+
+	test('a yielded resume failure restores suspended plus yielded for every transient conflict', async () => {
+		const runId = 'run-20260101-020000'
+		for (const error of ['run_in_progress', 'run_paused', 'pause_intent_clear_failed'] as const) {
+			const store = fakeQueueStore([suspendedItem({ id: 's1', runId, yielded: true, resumeNote: 'keep me', yieldedPauseAt: OPERATOR_PAUSE.pausedAt })])
+			const queue = queueOver(store, fakeSubmit([]), {
+				metas: { [runId]: operatorPausedMeta(runId) },
+				hasSuspendedRun: () => false,
+				resumeYieldedResults: [{ ok: false, error }],
+			})
+
+			await queue.tick()
+
+			const restored = requireItem(store.items(), 's1')
+			expect(restored.status).toBe('suspended')
+			expect(restored.yielded).toBe(true)
+		}
+	})
+
+	test('an unresumable yielded head is cancelled and the work behind it dispatches', async () => {
+		const runId = 'run-20260101-020000'
+		const store = fakeQueueStore([
+			suspendedItem({ id: 's1', runId, yielded: true }),
+			waitingItem({ id: 'w1' }),
+		])
+		const submit = fakeSubmit([{ ok: true, runId: 'run-20260101-010000' }])
+		const queue = queueOver(store, submit, {
+			metas: { [runId]: operatorPausedMeta(runId) },
+			hasSuspendedRun: () => false,
+			resumeYieldedResults: [{ ok: false, error: 'checkpoint_missing' }],
+		})
+
+		await queue.tick()
+
+		expect(requireItem(store.items(), 's1').status).toBe('cancelled')
+		expect(submit.calls.length).toBe(1)
+		expect(requireItem(store.items(), 'w1').status).toBe('active')
 	})
 })

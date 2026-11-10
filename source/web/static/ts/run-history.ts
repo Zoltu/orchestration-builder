@@ -8,10 +8,10 @@ export type HistoryEntry =
 	| { kind: 'queued'; item: QueueItemLike }
 	| { kind: 'run'; summary: RunSummary }
 
-// The single row per task: queued rows come first in display order (a suspended pause outranks waiting work), then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, suspended, or parked task never appears twice.
+// The single row per task: priority suspended rows come first (a provider suspension or a post-write/unknown operator pause outranks queued work), then the run order (waiting plus pre-write operator pauses, including yielded ones), then active and needs_input, then the runs whose id no queued row already represents. A queued row represents both the run it is attached to (`runId`) and the paused run it will re-enter (`resumesRunId`), so an active, answered, suspended, or parked task never appears twice.
 export function deriveHistoryEntries(items: QueueItemLike[], summaries: RunSummary[]): HistoryEntry[] {
 	const queued = deriveQueuedItems(items)
-	const orderedItems = [...queued.suspended, ...queued.waiting, ...queued.active, ...queued.needsInput]
+	const orderedItems = [...queued.suspended, ...queued.runOrder, ...queued.active, ...queued.needsInput]
 	const representedRunIds = new Set<string>()
 	for (const item of orderedItems) {
 		if (typeof item.runId === 'string' && item.runId !== '') representedRunIds.add(item.runId)

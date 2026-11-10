@@ -27,8 +27,12 @@ export interface QueueItemView {
 	readonly runId?: string
 	// Set while the item's run is suspended: when the pause began.
 	readonly suspendedAt?: string
+	// A yielded operator pause: the run stays suspended and resumable, but waiting work ahead of it runs first. Only a suspended item (or its transient active dispatch marker) carries it.
+	readonly yielded?: true
 	// Projected from the run meta at the HTTP boundary for a suspended item, so the row can name the pause kind before the run summary arrives.
 	readonly pause?: OperatorPauseRecord
+	// Projected from the run's checkpoint at the HTTP boundary for an active or suspended item: true once a write-capable role has started, false while pre-write, null when the checkpoint is missing, corrupt, or names another run.
+	readonly writeCapableStarted?: boolean | null
 	// The run a waiting answered item re-enters: a parked run or a direct clarification finish. The tool-call id, when present, stays internal.
 	readonly resumesRunId?: string
 	readonly queuedAt: string
@@ -48,7 +52,7 @@ export interface QueueItemView {
 }
 
 export interface QueueView {
-	// Head first: the scheduler dispatches the first waiting item.
+	// Head first: the scheduler considers waiting items and yielded suspended items in file order.
 	readonly items: readonly QueueItemView[]
 }
 
@@ -64,6 +68,11 @@ export interface QueueItem {
 	runId?: string
 	queuedAt: string
 	suspendedAt?: string
+	yielded?: true
+	// The operator's resume note held while a yielded pause waits for its turn; it is internal dispatch state and never projected into QueueItemView.
+	resumeNote?: string
+	// The pausedAt of the operator pause this yield belongs to. It keeps the transient yielded active marker from being mistaken for a later pause after a crash.
+	yieldedPauseAt?: string
 	settledAt?: string
 	question?: string
 	// The question's operator-facing presentation, populated only while the item is needs_input.
@@ -98,6 +107,23 @@ export function isQueueItem(value: unknown): value is QueueItem {
 	if (value.runId !== undefined && !isRunIdShape(value.runId)) return false
 	if (!isString(value.queuedAt)) return false
 	if (value.suspendedAt !== undefined && !isString(value.suspendedAt)) return false
+	if (value.yielded !== undefined) {
+		// A yield is only meaningful while the run is paused (or on the transient active dispatch marker that resumes it); it never survives into another lifecycle state.
+		if (value.yielded !== true) return false
+		if (value.status !== 'suspended' && value.status !== 'active') return false
+		// The transient active marker still names its run so a boot repair can bind the resume to it.
+		if (value.status === 'active' && value.runId === undefined) return false
+	}
+	if (value.resumeNote !== undefined) {
+		if (!isString(value.resumeNote) || value.resumeNote === '') return false
+		// A note rides only the yielded pause it will resume; every other lifecycle state has consumed or discarded it.
+		if (value.yielded !== true) return false
+	}
+	if (value.yieldedPauseAt !== undefined) {
+		if (!isString(value.yieldedPauseAt) || value.yieldedPauseAt === '') return false
+		// The pause identity exists only to qualify a yielded marker.
+		if (value.yielded !== true) return false
+	}
 	if (value.settledAt !== undefined && !isString(value.settledAt)) return false
 	if (value.question !== undefined && !isString(value.question)) return false
 	if (value.context !== undefined && !isString(value.context)) return false
@@ -157,6 +183,7 @@ export function toQueueItemView(item: QueueItem): QueueItemView {
 		...(item.resumeRunId !== undefined ? { resumesRunId: item.resumeRunId } : {}),
 		queuedAt: item.queuedAt,
 		...(item.suspendedAt !== undefined ? { suspendedAt: item.suspendedAt } : {}),
+		...(item.yielded !== undefined ? { yielded: item.yielded } : {}),
 		...(item.settledAt !== undefined ? { settledAt: item.settledAt } : {}),
 		...(item.question !== undefined ? { question: item.question } : {}),
 		...(item.context !== undefined ? { context: item.context } : {}),
@@ -169,6 +196,11 @@ export function toQueueItemView(item: QueueItem): QueueItemView {
 
 export function toQueueView(queue: TaskQueue): QueueView {
 	return { items: queue.items.map(toQueueItemView) }
+}
+
+// A run is queued for its own yielded resume when its item is suspended, or when the scheduler already wrote the transient yielded active marker for it. Boot reconciliation must not adopt either as a priority operator pause.
+export function isRunQueuedForResume(items: readonly QueueItemView[], runId: string): boolean {
+	return items.some((item) => item.runId === runId && item.yielded === true && (item.status === 'suspended' || item.status === 'active'))
 }
 
 export type NewQueueItemResult = { ok: true; item: QueueItem } | { ok: false; error: string }
@@ -280,20 +312,20 @@ export function editWaitingItem(queue: TaskQueue, id: string, edit: { task?: str
 	return { ok: true, queue: withReplacedItem(queue, edited), item: edited }
 }
 
-export function reorderWaitingItem(queue: TaskQueue, id: string, position: number): QueueMutation {
+// Reorders an item within the run order: the waiting items plus the operator-paused pre-write suspended items the caller names as orderable. The position indexes that order with the dragged item removed, clamped into range; every non-orderable item keeps its file position. A target the caller did not mark orderable is refused rather than silently moved.
+export function reorderRunOrderItem(queue: TaskQueue, id: string, position: number, orderableIds: ReadonlySet<string>): QueueMutation {
 	const target = findById(queue, id)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
-	if (target.status !== 'waiting') return { ok: false, reason: 'forbidden_status' }
-	// The position indexes the waiting sublist; out-of-range values clamp into it. Non-waiting items keep their file positions.
-	const others = queue.items.filter((item) => item.status === 'waiting' && item.id !== id)
+	if (!orderableIds.has(id)) return { ok: false, reason: 'forbidden_status' }
+	const others = queue.items.filter((item) => orderableIds.has(item.id) && item.id !== id)
 	const clamped = Math.max(0, Math.min(position, others.length))
-	const movedWaiting = [...others.slice(0, clamped), target, ...others.slice(clamped)]
-	const pendingWaiting = movedWaiting.slice()
+	const movedOrder = [...others.slice(0, clamped), target, ...others.slice(clamped)]
+	const pendingOrder = movedOrder.slice()
 	const items = queue.items.map((item) => {
-		if (item.status !== 'waiting') return item
-		const next = pendingWaiting.shift()
-		// Unreachable by construction: movedWaiting holds exactly the waiting items the file order walks.
-		if (next === undefined) throw new Error(`reorderWaitingItem: waiting-list bookkeeping lost item ${item.id}`)
+		if (!orderableIds.has(item.id)) return item
+		const next = pendingOrder.shift()
+		// Unreachable by construction: movedOrder holds exactly the orderable items the file order walks.
+		if (next === undefined) throw new Error(`reorderRunOrderItem: run-order bookkeeping lost item ${item.id}`)
 		return next
 	})
 	return { ok: true, queue: { version: QUEUE_FORMAT_VERSION, items }, item: target }
@@ -424,13 +456,18 @@ export function reactivateErrorItem(queue: TaskQueue, runId: string): QueueMutat
 	return { ok: true, queue: withReplacedItem(queue, reactivated), item: reactivated }
 }
 
-// The suspended resume's queue counterpart: the item returns to the active slot under the same run id and drops its pause stamp, so the resumed run's own settlement maps it exactly as any active item's would.
-export function reactivateSuspendedItem(queue: TaskQueue, runId: string): QueueMutation {
+// The suspended resume's queue counterpart: the item returns to the active slot under the same run id and drops its pause stamp, so the resumed run's own settlement maps it exactly as any active item's would. Only the scheduler's pre-resume crash window preserves the yielded marker; an explicit resume clears it immediately.
+export function reactivateSuspendedItem(queue: TaskQueue, runId: string, preserveYield = false): QueueMutation {
 	const target = queue.items.find((item) => item.status === 'suspended' && item.runId === runId)
 	if (target === undefined) return { ok: false, reason: 'not_found' }
+	const preserveMarker = preserveYield && target.yielded === true
+	const yieldedPauseAt = target.suspendedAt ?? target.yieldedPauseAt
 	const reactivated: QueueItem = {
 		...carriedFields(target),
 		...(target.continuesFrom !== undefined ? { continuesFrom: target.continuesFrom } : {}),
+		...(preserveMarker ? { yielded: true } : {}),
+		...(preserveMarker && target.resumeNote !== undefined ? { resumeNote: target.resumeNote } : {}),
+		...(preserveMarker && yieldedPauseAt !== undefined ? { yieldedPauseAt } : {}),
 		status: 'active',
 		runId,
 	}
@@ -556,8 +593,13 @@ export function repairActiveItem(item: QueueItem, meta: RunMeta | null, settledA
 	if (runId !== undefined) {
 		if (meta === null) return releaseToWaiting(item)
 		if (meta.status === 'running') return null
-		// The suspended meta landed but the queue write did not: preserve the run binding and pause stamp instead of treating the pause as a stale work item.
-		if (meta.status === 'suspended') return suspendedItem(item, meta.suspension?.suspendedAt ?? meta.pause?.pausedAt ?? settledAt, runId)
+		// The suspended meta landed but the queue write did not: preserve the run binding and pause stamp. The yielded marker rides only the exact operator pause it was created for, never a provider suspension or a later pause.
+		if (meta.status === 'suspended') {
+			const suspended = suspendedItem(item, meta.suspension?.suspendedAt ?? meta.pause?.pausedAt ?? settledAt, runId)
+			const sameOperatorPause = item.yielded === true && meta.pause !== undefined && item.yieldedPauseAt === meta.pause.pausedAt
+			if (!sameOperatorPause) return suspended
+			return { ...suspended, yielded: true, ...(item.resumeNote !== undefined ? { resumeNote: item.resumeNote } : {}), ...(item.yieldedPauseAt !== undefined ? { yieldedPauseAt: item.yieldedPauseAt } : {}) }
+		}
 		// Only a needs_clarification terminal can mean the answer is still undelivered: success/error prove the resumed run finished, and releasing those would rerun a done task. A re-park (different call, or a clarification checkpoint that already records this answer id) is delivered and settles normally.
 		if (meta.status === 'needs_clarification' && pendingAnswerUndelivered(item, pauseState, runId)) {
 			return releaseToWaiting(item)
@@ -584,11 +626,19 @@ export function repairSuspendedItem(item: QueueItem, meta: RunMeta | null, settl
 	const runId = item.runId
 	if (runId === undefined) return cancelledItem(item, settledAt)
 	if (meta === null) return cancelledItem(item, settledAt)
-	if (meta.status === 'suspended') return null
+	if (meta.status === 'suspended') {
+		if (item.yielded !== true) return null
+		const sameOperatorPause = meta.pause !== undefined && item.yieldedPauseAt === meta.pause.pausedAt
+		if (sameOperatorPause) return null
+		return suspendedItem(item, meta.suspension?.suspendedAt ?? meta.pause?.pausedAt ?? settledAt, runId)
+	}
 	if (meta.status === 'running') {
 		return {
 			...carriedFields(item),
 			...(item.continuesFrom !== undefined ? { continuesFrom: item.continuesFrom } : {}),
+			...(item.yielded === true ? { yielded: true } : {}),
+			...(item.yielded === true && item.resumeNote !== undefined ? { resumeNote: item.resumeNote } : {}),
+			...(item.yielded === true && item.yieldedPauseAt !== undefined ? { yieldedPauseAt: item.yieldedPauseAt } : {}),
 			status: 'active',
 			runId,
 		}

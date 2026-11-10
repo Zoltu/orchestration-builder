@@ -488,6 +488,9 @@ describe('provider auto-resume coordinator', () => {
 				reactivateErrorItem: () => {},
 				reactivateSuspendedItem: () => {},
 				discardSuspendedRun: () => {},
+				hasRunnableWorkAheadOfRun: () => false,
+				yieldPausedRun: () => false,
+				tick: async () => {},
 			},
 		})
 		const coordinator = createProviderAutoResumeCoordinator({
@@ -584,6 +587,9 @@ describe('provider auto-resume coordinator', () => {
 				discardSuspendedRun: (runId, reason) => {
 					reasons.push({ runId, reason })
 				},
+				hasRunnableWorkAheadOfRun: () => false,
+				yieldPausedRun: () => false,
+				tick: async () => {},
 			},
 		})
 		const coordinator = createProviderAutoResumeCoordinator({

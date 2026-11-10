@@ -66,6 +66,17 @@ describe('deriveFaviconState', () => {
 		expect(deriveFaviconState([{ status: 'suspended', suspension: { category: 'transient', resumePolicy: 'auto' } }], [], [queueItem({ status: 'suspended' })])).toBe('waiting')
 	})
 
+	test('a yielded suspended queue item does not force pending-input, while a non-yielded one still does', () => {
+		expect(deriveFaviconState([], [], [{ status: 'suspended', yielded: true }])).toBe('complete')
+		expect(deriveFaviconState([], [], [{ status: 'suspended', yielded: false }])).toBe('pending-input')
+	})
+
+	test('a yielded suspended queue item suppresses its own suspended summary pause', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		expect(deriveFaviconState([{ runId: 'run-y', status: 'suspended', pause }], [], [{ runId: 'run-y', status: 'suspended', yielded: true }])).toBe('complete')
+		expect(deriveFaviconState([{ runId: 'run-y', status: 'suspended', pause }], [], [{ runId: 'run-y', status: 'suspended' }])).toBe('pending-input')
+	})
+
 	test('a queue item that is not needs_input does not force pending-input', () => {
 		expect(deriveFaviconState([{ status: 'success' }], [], [queueItem({ status: 'waiting' })])).toBe('complete')
 		expect(deriveFaviconState([{ status: 'success' }], [], [queueItem({ status: 'done' })])).toBe('complete')

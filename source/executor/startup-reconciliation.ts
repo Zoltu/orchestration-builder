@@ -16,6 +16,8 @@ export interface StartupReconciliationDependencies {
 	readRunFormat: ReadRunFormat
 	readPauseRequestById: ReadPauseRequestById
 	deletePauseRequest: (runId: string) => void
+	// True when the durable queue holds the run's suspended item yielded: such an operator pause is not a priority pause, so boot leaves it to the scheduler's run order instead of adopting it.
+	isRunQueuedForResume: (runId: string) => boolean
 	// A factory rather than a single leaf: reconciliation may need to write terminal metas for several abandoned runs.
 	writeMetaFor: (runId: string) => WriteMeta
 	resume: (checkpoint: RunCheckpoint) => void
@@ -214,8 +216,13 @@ export function reconcileRunsOnStartup(dependencies: StartupReconciliationDepend
 				dependencies.deletePauseRequest(runId)
 				continue
 			}
-			// A durable operator pause stays paused; a durable provider suspension stays with provider recovery.
-			paused.push({ runId, meta, startTime: meta.startTime, kind: meta.pause !== undefined ? 'operator' : 'provider' })
+			// A durable operator pause stays paused unless it was yielded: a yielded pause belongs to the scheduler's run order and must not become a priority pause or supersede a resumable run. A durable provider suspension stays with provider recovery.
+			const kind = meta.pause !== undefined ? 'operator' : 'provider'
+			if (kind === 'operator' && dependencies.isRunQueuedForResume(runId)) {
+				dependencies.deletePauseRequest(runId)
+				continue
+			}
+			paused.push({ runId, meta, startTime: meta.startTime, kind })
 			dependencies.deletePauseRequest(runId)
 			continue
 		}
@@ -235,13 +242,13 @@ export function reconcileRunsOnStartup(dependencies: StartupReconciliationDepend
 		if (checkpoint.pause !== undefined) {
 			markOperatorPaused(dependencies, runId, meta, checkpoint, checkpoint.pause)
 			dependencies.deletePauseRequest(runId)
-			paused.push({ runId, meta, startTime: meta?.startTime ?? checkpoint.startTime, kind: 'operator' })
+			if (!dependencies.isRunQueuedForResume(runId)) paused.push({ runId, meta, startTime: meta?.startTime ?? checkpoint.startTime, kind: 'operator' })
 			continue
 		}
 		if (pauseIntent !== null) {
 			markOperatorPaused(dependencies, runId, meta, checkpoint, operatorPauseFromIntent(pauseIntent))
 			dependencies.deletePauseRequest(runId)
-			paused.push({ runId, meta, startTime: meta?.startTime ?? checkpoint.startTime, kind: 'operator' })
+			if (!dependencies.isRunQueuedForResume(runId)) paused.push({ runId, meta, startTime: meta?.startTime ?? checkpoint.startTime, kind: 'operator' })
 			continue
 		}
 		// An invalid or absent marker is advisory only; an invalid one is removed so boot does not keep reconsidering it.

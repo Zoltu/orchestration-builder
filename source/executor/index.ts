@@ -69,10 +69,10 @@ export type { DeltaChannel, DeltaField, DeltaSubscriber, RoleDelta, RunDelta } f
 export { createStateInvalidationChannel } from './state-invalidation-channel.js'
 export type { StateInvalidationChannel, StateInvalidationSubscriber } from './state-invalidation-channel.js'
 
-export { createRunSubmission, createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createReadPauseStateById, createResumeParkedRun, createResumeClarificationRun, createTerminatePausedRun } from './run-submission.js'
-export type { ReadPauseStateById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, ResumeSuspendedRunAutomatically, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
+export { createRunSubmission, createResumeErroredOrSuspendedRun, createResumeSuspendedRunAutomatically, createReadPauseStateById, createReadWriteCapableStartedById, createResumeParkedRun, createResumeClarificationRun, createResumeYieldedRun, createTerminatePausedRun } from './run-submission.js'
+export type { ReadPauseStateById, ReadWriteCapableStartedById, ResumeClarificationRun, ResumeClarificationRunDependencies, ResumeClarificationRunRejection, ResumeClarificationRunResult, ResumeErroredOrSuspendedRun, ResumeErroredOrSuspendedRunDependencies, ResumeErroredOrSuspendedRunRejection, ResumeErroredOrSuspendedRunResult, ResumeParkedRun, ResumeParkedRunDependencies, ResumeParkedRunRejection, ResumeParkedRunResult, ResumeRun, ResumeRunInvocation, ResumeSuspendedRunAutomatically, ResumeYieldedRun, ResumeYieldedRunDependencies, RunSubmission, RunSubmissionDependencies, PausedRunKind, StartRun, SubmitResult, TerminatePausedRun, TerminatePausedRunDependencies, TerminatePausedRunRejection, TerminatePausedRunResult } from './run-submission.js'
 
-export { createTaskQueue } from './queue/index.js'
+export { createTaskQueue, isRunQueuedForResume } from './queue/index.js'
 export type {
 	QueueEnqueueOutcome,
 	QueueHandles,

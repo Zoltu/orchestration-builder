@@ -5,7 +5,7 @@ import type { EffortLevel, InvolvementLevel, LogEvent, LogLevel, RunContinuation
 import type { ReadProjectSettings, ReadRunCheckpointById, ReadRunMetaById, RunDirectoryExists } from './persistence.ts'
 import { DEFAULT_EFFORT } from './effort.ts'
 import { DEFAULT_INVOLVEMENT } from './involvement.ts'
-import { createReadPauseStateById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createRunSubmission, createTerminatePausedRun, type ProviderSuspensionOwner, type ResumeErroredOrSuspendedRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
+import { createReadPauseStateById, createReadWriteCapableStartedById, createResumeClarificationRun, createResumeErroredOrSuspendedRun, createResumeParkedRun, createResumeYieldedRun, createRunSubmission, createTerminatePausedRun, type ProviderSuspensionOwner, type ResumeErroredOrSuspendedRunDependencies, type ResumeRun, type RunSubmission, type StartRun } from './run-submission.ts'
 import { isRunMeta } from './validation.ts'
 import { createTaskQueue, type QueueItemView, type QueueView, type TaskQueueModule } from './queue/index.ts'
 import { defined, flushMicrotasks } from './test-fixtures.ts'
@@ -1180,6 +1180,8 @@ describe('createResumeErroredOrSuspendedRun', () => {
 				throw new Error('the resume path does not assemble a briefing')
 			},
 			readPauseStateById: () => null,
+			readWriteCapableStartedById: () => null,
+			resumeYieldedRun: () => ({ ok: false, error: 'run_not_resumable' }),
 			resumeParkedRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			resumeClarificationRun: () => ({ ok: false, error: 'checkpoint_missing' }),
 			terminatePausedRun: () => ({ ok: false, error: 'not_found' }),
@@ -2202,5 +2204,230 @@ describe('createRunSubmission state invalidation', () => {
 
 		expect(notificationsAfterStart).toBe(1)
 		expect(notifications).toBe(notificationsAfterStart)
+	})
+})
+
+describe('yielded operator pauses on explicit resume', () => {
+	const runId = 'run-20260101-000009'
+	const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+
+	function pausedMeta(): RunMeta {
+		return { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause }
+	}
+
+	function checkpointFor(targetRunId: string): RunCheckpoint {
+		const checkpoint = parkedCheckpointFor(targetRunId)
+		delete checkpoint.parkedAsk
+		return checkpoint
+	}
+
+	function makeHarness(options: { runnableAhead: boolean; writeCapableStarted?: boolean; adopt?: boolean; yieldSucceeds?: boolean }): {
+		resume: ReturnType<typeof createResumeErroredOrSuspendedRun>
+		submission: RunSubmission
+		yielded: string[]
+		yieldedNotes: Array<string | undefined>
+		ticks: () => number
+		resumeCalls: Array<{ explicitResume?: boolean; freshIncident?: boolean; resumeNote?: string }>
+	} {
+		const resumeCalls: Array<{ explicitResume?: boolean; freshIncident?: boolean; resumeNote?: string }> = []
+		const resumeRun: ResumeRun = async (checkpoint, resumeOptions) => {
+			resumeCalls.push({ explicitResume: resumeOptions?.explicitResume, freshIncident: resumeOptions?.freshIncident, ...(resumeOptions?.resumeNote !== undefined ? { resumeNote: resumeOptions.resumeNote } : {}) })
+			return sampleMeta(checkpoint.runId)
+		}
+		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing,
+			startRun: unusedStartRun,
+			resumeRun,
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+		})
+		if (options.adopt !== false) submission.adoptOperatorPausedRun(runId)
+		const yielded: string[] = []
+		const yieldedNotes: Array<string | undefined> = []
+		let tickCount = 0
+		const taskQueue = {
+			reactivateErrorItem: () => {},
+			reactivateSuspendedItem: () => {},
+			discardSuspendedRun: () => {},
+			hasRunnableWorkAheadOfRun: () => options.runnableAhead,
+			yieldPausedRun: (targetRunId: string, note?: string) => {
+				yielded.push(targetRunId)
+				yieldedNotes.push(note)
+				return options.yieldSucceeds ?? true
+			},
+			tick: async () => {
+				tickCount += 1
+			},
+		}
+		const checkpoint = checkpointFor(runId)
+		if (options.writeCapableStarted === true) checkpoint.writeCapableStarted = true
+		const metas = new Map([[runId, JSON.stringify(pausedMeta())]])
+		const checkpoints = new Map([[runId, JSON.stringify(checkpoint)]])
+		const resume = createResumeErroredOrSuspendedRun({
+			runSubmission: submission,
+			readRunMetaById: (targetRunId) => metas.get(targetRunId) ?? null,
+			readCheckpointById: (targetRunId) => checkpoints.get(targetRunId) ?? null,
+			deletePauseRequest: () => true,
+			taskQueue,
+		})
+		return { resume, submission, yielded, yieldedNotes, ticks: () => tickCount, resumeCalls }
+	}
+
+	test('turns an explicit unpause into a yield when runnable work is ahead and the run is pre-write', async () => {
+		const harness = makeHarness({ runnableAhead: true })
+
+		expect(harness.resume(runId, undefined)).toEqual({ ok: true, runId, queued: true })
+		expect(harness.yielded).toEqual([runId])
+		expect(harness.resumeCalls).toEqual([])
+		expect(harness.submission.activeRunId()).toBeUndefined()
+		expect(harness.submission.pausedRunId()).toBeUndefined()
+		await flushMicrotasks()
+		expect(harness.ticks()).toBe(1)
+	})
+
+	test('stores the operator note for the scheduler when the unpause becomes a yield', async () => {
+		const harness = makeHarness({ runnableAhead: true })
+
+		expect(harness.resume(runId, 'wait for the queue')).toEqual({ ok: true, runId, queued: true })
+		expect(harness.yieldedNotes).toEqual(['wait for the queue'])
+		expect(harness.resumeCalls).toEqual([])
+	})
+
+	test('falls through to an immediate resume when the yielding write cannot find the suspended item', async () => {
+		const harness = makeHarness({ runnableAhead: true, yieldSucceeds: false })
+
+		expect(harness.resume(runId, 'carry on')).toEqual({ ok: true, runId })
+		expect(harness.yielded).toEqual([runId])
+		expect(harness.submission.activeRunId()).toBe(runId)
+		expect(harness.resumeCalls).toEqual([{ explicitResume: true, freshIncident: true, resumeNote: 'The operator resumed this paused run. Message from the operator: carry on' }])
+		await harness.submission.awaitActive()
+	})
+
+	test('resumes immediately when no runnable work is ahead', async () => {
+		const harness = makeHarness({ runnableAhead: false })
+
+		expect(harness.resume(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.yielded).toEqual([])
+		expect(harness.submission.activeRunId()).toBe(runId)
+		expect(harness.resumeCalls).toEqual([{ explicitResume: true, freshIncident: true }])
+		await harness.submission.awaitActive()
+	})
+
+	test('a post-write pause resumes immediately even with runnable work ahead', async () => {
+		const harness = makeHarness({ runnableAhead: true, writeCapableStarted: true })
+
+		expect(harness.resume(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.yielded).toEqual([])
+		expect(harness.submission.activeRunId()).toBe(runId)
+		await harness.submission.awaitActive()
+	})
+
+	test('an already-yielded pause resumes immediately because its binding is already cleared', async () => {
+		const harness = makeHarness({ runnableAhead: true, adopt: false })
+
+		expect(harness.resume(runId, undefined)).toEqual({ ok: true, runId })
+		expect(harness.yielded).toEqual([])
+		expect(harness.submission.activeRunId()).toBe(runId)
+		await harness.submission.awaitActive()
+	})
+})
+
+describe('createReadWriteCapableStartedById', () => {
+	const readCheckpointById: ReadRunCheckpointById = (runId) => {
+		if (runId === 'run-pre-write') return JSON.stringify(parkedCheckpointFor('run-pre-write'))
+		if (runId === 'run-post-write') {
+			const checkpoint = parkedCheckpointFor('run-post-write')
+			checkpoint.writeCapableStarted = true
+			return JSON.stringify(checkpoint)
+		}
+		if (runId === 'run-corrupt') return '{not json'
+		if (runId === 'run-mismatched') return JSON.stringify(parkedCheckpointFor('run-other'))
+		return null
+	}
+
+	test('reads false pre-write, true post-write, and null for every absent or unusable checkpoint', () => {
+		const readWriteCapableStartedById = createReadWriteCapableStartedById(readCheckpointById)
+
+		expect(readWriteCapableStartedById('run-pre-write')).toBe(false)
+		expect(readWriteCapableStartedById('run-post-write')).toBe(true)
+		expect(readWriteCapableStartedById('run-corrupt')).toBeNull()
+		expect(readWriteCapableStartedById('run-mismatched')).toBeNull()
+		expect(readWriteCapableStartedById('run-missing')).toBeNull()
+	})
+})
+
+describe('createResumeYieldedRun', () => {
+	const runId = 'run-20260101-000009'
+	const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+
+	function checkpointFor(targetRunId: string): RunCheckpoint {
+		const checkpoint = parkedCheckpointFor(targetRunId)
+		delete checkpoint.parkedAsk
+		return checkpoint
+	}
+
+	function makeHarness(options: { meta?: RunMeta | null; checkpoint?: RunCheckpoint | null; active?: boolean; deleteOk?: boolean } = {}): {
+		resumeYieldedRun: ReturnType<typeof createResumeYieldedRun>
+		submission: RunSubmission
+		resumeCalls: Array<{ explicitResume?: boolean; freshIncident?: boolean; resumeNote?: string }>
+	} {
+		const resumeCalls: Array<{ explicitResume?: boolean; freshIncident?: boolean; resumeNote?: string }> = []
+		const submission = createRunSubmission({
+			notifyStateChanged: notifyNothing,
+			providerSuspension: providerSuspensionForTest(),
+			onRunSettled: settleNothing,
+			startRun: unusedStartRun,
+			resumeRun: async (checkpoint, resumeOptions) => {
+				resumeCalls.push({ explicitResume: resumeOptions?.explicitResume, freshIncident: resumeOptions?.freshIncident, ...(resumeOptions?.resumeNote !== undefined ? { resumeNote: resumeOptions.resumeNote } : {}) })
+				return sampleMeta(checkpoint.runId)
+			},
+			generateRunId: () => 'run-1',
+			readProjectSettings: emptySettings,
+			runDirectoryExists: emptyRunsDir,
+		})
+		if (options.active === true) submission.submit('active task')
+		const meta = options.meta === undefined ? { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', pause } : options.meta
+		const checkpoint = options.checkpoint === undefined ? checkpointFor(runId) : options.checkpoint
+		const metas = new Map(meta === null ? [] : [[runId, JSON.stringify(meta)]])
+		const checkpoints = new Map(checkpoint === null ? [] : [[runId, JSON.stringify(checkpoint)]])
+		const resumeYieldedRun = createResumeYieldedRun({
+			runSubmission: submission,
+			readRunMetaById: (targetRunId) => metas.get(targetRunId) ?? null,
+			readCheckpointById: (targetRunId) => checkpoints.get(targetRunId) ?? null,
+			deletePauseRequest: () => options.deleteOk ?? true,
+		})
+		return { resumeYieldedRun, submission, resumeCalls }
+	}
+
+	test('resumes a suspended operator-paused run under its own id without reactivating a queue item', async () => {
+		const harness = makeHarness()
+
+		expect(harness.resumeYieldedRun(runId)).toEqual({ ok: true, runId })
+		expect(harness.resumeCalls).toEqual([{ explicitResume: true, freshIncident: true }])
+		expect(harness.submission.activeRunId()).toBe(runId)
+		await harness.submission.awaitActive()
+	})
+
+	test('threads the stored note through the operator-pause resume prefix', async () => {
+		const harness = makeHarness()
+
+		expect(harness.resumeYieldedRun(runId, 'wait for the queue')).toEqual({ ok: true, runId })
+		expect(harness.resumeCalls).toEqual([{ explicitResume: true, freshIncident: true, resumeNote: 'The operator resumed this paused run. Message from the operator: wait for the queue' }])
+		await harness.submission.awaitActive()
+	})
+
+	test('rejects an active slot, a non-operator pause, a missing checkpoint, and an uncleared marker', () => {
+		const active = makeHarness({ active: true })
+		expect(active.resumeYieldedRun(runId)).toEqual({ ok: false, error: 'run_in_progress' })
+		const provider = makeHarness({ meta: { runId, task: 'do it', status: 'suspended', startTime: '2026-01-01T00:00:00.000Z', suspension: { category: 'billing', resumePolicy: 'operator', message: 'Top up.', suspendedAt: '2026-01-01T00:02:00.000Z' } } })
+		expect(provider.resumeYieldedRun(runId)).toEqual({ ok: false, error: 'run_not_resumable' })
+		expect(makeHarness({ meta: null }).resumeYieldedRun(runId)).toEqual({ ok: false, error: 'run_not_found' })
+		expect(makeHarness({ checkpoint: null }).resumeYieldedRun(runId)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(makeHarness({ checkpoint: checkpointFor('run-other') }).resumeYieldedRun(runId)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(makeHarness({ checkpoint: parkedCheckpointFor(runId) }).resumeYieldedRun(runId)).toEqual({ ok: false, error: 'checkpoint_missing' })
+		expect(makeHarness({ deleteOk: false }).resumeYieldedRun(runId)).toEqual({ ok: false, error: 'pause_intent_clear_failed' })
 	})
 })

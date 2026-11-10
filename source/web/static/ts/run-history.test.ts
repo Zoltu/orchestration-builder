@@ -96,6 +96,43 @@ describe('deriveHistoryEntries', () => {
 		)
 		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual(['parked', 'run-parent'])
 	})
+
+	test('orders priority suspended rows first, then the run order (with a yielded pause), active, needs_input, and the remaining runs', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const entries = deriveHistoryEntries(
+			[
+				item({ id: 'waiting', status: 'waiting' }),
+				item({ id: 'provider', status: 'suspended', runId: 'run-provider' }),
+				item({ id: 'prewrite', status: 'suspended', runId: 'run-prewrite', pause, writeCapableStarted: false }),
+				item({ id: 'yielded', status: 'suspended', runId: 'run-yielded', pause, yielded: true, writeCapableStarted: false }),
+				item({ id: 'active', status: 'active', runId: 'run-active' }),
+				item({ id: 'needs', status: 'needs_input', runId: 'run-needs' }),
+				item({ id: 'postwrite', status: 'suspended', runId: 'run-postwrite', pause, writeCapableStarted: true }),
+				item({ id: 'unknown', status: 'suspended', runId: 'run-unknown', pause, writeCapableStarted: null }),
+			],
+			[summary('run-provider', { status: 'suspended' }), summary('run-prewrite', { status: 'suspended', pause }), summary('run-yielded', { status: 'suspended', pause }), summary('run-active', { status: 'running' }), summary('run-needs', { status: 'needs_clarification' }), summary('run-postwrite', { status: 'suspended', pause }), summary('run-unknown', { status: 'suspended', pause }), summary('run-free')],
+		)
+		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual([
+			'provider',
+			'postwrite',
+			'unknown',
+			'waiting',
+			'prewrite',
+			'yielded',
+			'active',
+			'needs',
+			'run-free',
+		])
+	})
+
+	test('a yielded item suppresses the suspended run row it represents', () => {
+		const pause = { message: 'The operator paused this run.', pausedAt: '2026-01-01T00:02:00.000Z' }
+		const entries = deriveHistoryEntries(
+			[item({ id: 'yielded', status: 'suspended', runId: 'run-y', pause, yielded: true, writeCapableStarted: false })],
+			[summary('run-y', { status: 'suspended', pause }), summary('run-other')],
+		)
+		expect(entries.map((entry) => entry.kind === 'queued' ? entry.item.id : entry.summary.runId)).toEqual(['yielded', 'run-other'])
+	})
 })
 
 describe('runPrimaryLabel', () => {

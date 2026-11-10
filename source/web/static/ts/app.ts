@@ -47,7 +47,7 @@ import { responseBelongsToSelection } from './stale-response.js'
 import { createStreamClient } from './stream-client.js'
 import { nextLivePartial } from './live-partial.js'
 import { LoadingIndicator } from './loading-indicator.js'
-import { backlogCount, deriveReorderPosition, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusLabel, reorderWaitingItems } from './queue-panel.js'
+import { backlogCount, deriveRunOrderPosition, isOperatorPausedItem, isPausedPostWrite, isPausedPreWrite, isQueueItemLike, matchesParkedRun, queueItemPrimaryText, queueRowPauseKind, queueStatusText, reorderRunOrderItems, runOrderHint, writeStateLabel } from './queue-panel.js'
 import type { InteractionModel, OperatorPauseRecord, Participant, RunStatus, SuspensionRecord } from './interaction-model.js'
 import type { FlowFeedState } from './flow-feed/index.js'
 import type { HealthView, RunListFeedState, RunResultCard, RunSummary } from './run-list-feed/index.js'
@@ -211,11 +211,14 @@ export interface ApplicationState {
 	queueItems: QueueItemLike[]
 	justSubmittedItemId: string | null
 	pendingAddSelectionId: string | null
-	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer or termination is posting.
+	// The queue panel's row-level view state: the waiting item being inline-edited, the row being dragged, and the item whose answer, termination, or defer is posting.
 	editingItemId: string | null
 	draggingItemId: string | null
 	queueAnswerPendingId: string | null
 	queueTerminatePendingId: string | null
+	queueDeferPendingId: string | null
+	// A successful queue action's confirmation (a deferred pause, a run queued behind the work ahead), shown above the content and dismissed by the operator.
+	queueActionNotice: string | null
 	// The answered item whose resume has not been dispatched yet (the answer landed while another run was active, so the item is still waiting without a runId). The periodic queue poll watches it and re-engages the watch screen once the item finally resumes.
 	pendingResumeItemId: string | null
 	serverAvailable: boolean
@@ -1136,6 +1139,12 @@ function RequestPause(state: ApplicationState): ActionReturn {
 	]
 }
 
+// The queue row's Pause button sits inside the row's select-run click target, so it stops the click from bubbling before using the same pause request path as the top bar.
+function PauseActiveRunForReorder(state: ApplicationState, event: Event): ActionReturn {
+	event.stopPropagation()
+	return RequestPause(state)
+}
+
 function GotPauseRequest(runId: string) {
 	return function GotPauseRequestForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		if (state.pauseRequestPendingRunId !== runId) return state
@@ -1304,6 +1313,52 @@ function QueueMutated(state: ApplicationState, payload: FetchResultPayload): Act
 	]
 }
 
+function deferFailureCopy(body: unknown, status: number): string {
+	const error = isObject(body) ? body['error'] : undefined
+	if (status === 404 || error === 'not_found') return 'The task could not be found, so it was not moved.'
+	if (status === 409 || error === 'status_forbidden') return 'Only an operator-paused run before writing can be moved behind queued work.'
+	return 'The task could not be moved behind queued work.'
+}
+
+// The paused pre-write row's defer action: move the run behind all waiting work in the run order. The row's main area selects its run, so the click stops propagation. The queue and run list refetch on both outcomes so the displayed order reconciles with the server; the run stays paused until the operator unpauses.
+function DeferQueueItem(itemId: string) {
+	return function DeferQueueItemAction(state: ApplicationState, event: Event): ActionReturn {
+		event.stopPropagation()
+		if (state.queueDeferPendingId !== null || state.resumeRunPendingId !== null || state.queueTerminatePendingId !== null) return state
+		return [
+			{ ...state, queueDeferPendingId: itemId, queueActionNotice: null },
+			Fetch({
+				url: `api/queue/${encodeURIComponent(itemId)}/defer`,
+				init: { method: 'POST' },
+				ok: GotQueueDeferred,
+				fail: DeferQueueItemFailed,
+			}),
+		]
+	}
+}
+
+function GotQueueDeferred(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
+	const cleared: ApplicationState = { ...state, queueDeferPendingId: null, serverAvailable: true }
+	const effects: OptionalEffect[] = [
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+	]
+	if (!payload.ok) return [{ ...cleared, suspendedActionNotice: deferFailureCopy(payload.body, payload.status) }, ...effects]
+	return [{ ...cleared, queueActionNotice: 'Moved behind the queued work; unpause to start this order.' }, ...effects]
+}
+
+function DeferQueueItemFailed(state: ApplicationState): ActionReturn {
+	return [
+		{ ...state, queueDeferPendingId: null, suspendedActionNotice: 'The server could not be reached, so the task was not moved.', serverAvailable: false },
+		Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+	]
+}
+
+function DismissQueueActionNotice(state: ApplicationState): ApplicationState {
+	return state.queueActionNotice === null ? state : { ...state, queueActionNotice: null }
+}
+
 // A failed parked answer ends the in-flight window, rolls back the attempted suppression, reopens the prompt, and surfaces the error.
 function QueueAnswerFailed(promptKey: string) {
 	return function QueueAnswerFailedForPrompt(state: ApplicationState): ActionReturn {
@@ -1419,7 +1474,7 @@ function pauseKindForRun(state: ApplicationState, runId: string): RunPauseKind {
 function TerminateSuspendedRun(runId: string, itemId: string | null = null) {
 	return function TerminateSuspendedRunAction(state: ApplicationState, event: Event): ActionReturn {
 		event.stopPropagation()
-		if (state.queueTerminatePendingId !== null || state.resumeRunPendingId !== null) return state
+		if (state.queueTerminatePendingId !== null || state.resumeRunPendingId !== null || state.queueDeferPendingId !== null) return state
 		const pauseLabel = pauseKindForRun(state, runId) === 'operator' ? 'paused' : 'suspended'
 		if (!window.confirm(`Terminate this ${pauseLabel} run? Its saved context will be discarded.`)) return state
 		const target = suspendedTerminateTarget(runId, itemId)
@@ -1465,7 +1520,7 @@ function SuspendedTerminateFailed(state: ApplicationState): ActionReturn {
 }
 
 // --- Queue drag-to-reorder ---------------------------------------------------
-// Waiting rows are HTML5 drag sources and drop targets: dragstart records the dragged item's id (and sets the transfer data, without which Firefox refuses to start the drag), the drop computes the PATCH position from the target row's waiting index, and the reorder applies optimistically before the PATCH confirms. dragend clears the marker whatever happened — including a drop outside any row.
+// Waiting rows and operator-paused pre-write suspended rows are HTML5 drag sources and drop targets: dragstart records the dragged item's id (and sets the transfer data, without which Firefox refuses to start the drag), the drop computes the PATCH position from the target row's run-order index, and the reorder applies optimistically before the PATCH confirms. dragend clears the marker whatever happened — including a drop outside any row.
 
 // The event target's data-attribute value, or null — the DOM read every queue row action shares.
 function dataAttributeOf(event: Event, attribute: string): string | null {
@@ -1496,10 +1551,10 @@ function DropQueueItem(state: ApplicationState, event: DragEvent): ActionReturn 
 	const targetId = dataAttributeOf(event, 'data-item-id')
 	const draggedId = state.draggingItemId
 	if (targetId === null || typeof draggedId !== 'string' || draggedId === targetId) return { ...state, draggingItemId: null }
-	const position = deriveReorderPosition(state.queueItems, draggedId, targetId)
+	const position = deriveRunOrderPosition(state.queueItems, draggedId, targetId)
 	if (position === null) return { ...state, draggingItemId: null }
 	return [
-		{ ...state, queueItems: reorderWaitingItems(state.queueItems, draggedId, position), draggingItemId: null },
+		{ ...state, queueItems: reorderRunOrderItems(state.queueItems, draggedId, position), draggingItemId: null },
 		Fetch({
 			url: `api/queue/${encodeURIComponent(draggedId)}`,
 			init: { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ position }) },
@@ -2402,8 +2457,8 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 	const resumedRunId = state.resumingRunId
 	// The response belongs to the resume mode it was sent from; a cancel mid-flight drops it — the polled run list shows whatever the server actually did.
 	if (resumedRunId === null) return state
+	const body = payload.body
 	if (payload.status === 201) {
-		const body = payload.body
 		if (isObject(body) && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
 			inspectorSession.close()
 			const reset = switchRunView(state, resumedRunId, null)
@@ -2413,6 +2468,14 @@ function GotResumedRun(state: ApplicationState, payload: FetchResultPayload): Ac
 		}
 		// A 201 that does not confirm the same run id is not a landing to act on: keep the mode (and the note) so the operator can retry, with the oddity said plainly.
 		return { ...state, resumeSending: false, resumeNotice: 'The server confirmed the resume but the response could not be read — check History before resuming again.' }
+	}
+	// The shared resume endpoint can yield a suspended operator pause from this compose path too: keep the run suspended, leave the watch selection alone, and report that it is queued behind the work ahead.
+	if (payload.status === 202 && isObject(body) && body['ok'] === true && body['queued'] === true && typeof body['runId'] === 'string' && body['runId'] === resumedRunId) {
+		return [
+			{ ...state, resumingRunId: null, resumeSending: false, resumeNotice: null, continuation: null, queueActionNotice: 'This run is queued to resume after the work ahead.', serverAvailable: true },
+			Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+			Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+		]
 	}
 	return { ...state, resumeSending: false, resumeNotice: resumeFailureNotice(payload) }
 }
@@ -2430,9 +2493,9 @@ function ResumeFailed(state: ApplicationState): ApplicationState {
 function ResumeSuspendedRunNow(runId: string) {
 	return function ResumeSuspendedRunNowAction(state: ApplicationState, event: Event): ActionReturn {
 		event.stopPropagation()
-		if (state.resumeRunPendingId !== null || state.resumeSending || state.createSending) return state
+		if (state.resumeRunPendingId !== null || state.resumeSending || state.createSending || state.queueDeferPendingId !== null) return state
 		return [
-			{ ...state, resumeRunPendingId: runId, suspendedActionNotice: null },
+			{ ...state, resumeRunPendingId: runId, suspendedActionNotice: null, queueActionNotice: null },
 			Fetch({
 				url: `api/runs/${encodeURIComponent(runId)}/resume`,
 				init: { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) },
@@ -2447,10 +2510,18 @@ function GotSuspendedResume(runId: string) {
 	return function GotSuspendedResumeForRun(state: ApplicationState, payload: FetchResultPayload): ActionReturn {
 		const cleared: ApplicationState = { ...state, resumeRunPendingId: null, serverAvailable: true }
 		const body = payload.body
+		// A 202 keeps the run suspended but yields its queue item behind the work ahead: the scheduler resumes it when it reaches the head. Close the pause card and confirm the queued resume without switching the watch screen.
+		if (payload.status === 202 && isObject(body) && body['ok'] === true && body['queued'] === true && typeof body['runId'] === 'string' && body['runId'] === runId) {
+			return [
+				{ ...cleared, suspendedModalOpen: false, suspendedDiagnosticsOpen: false, suspendedDiagnosticsLoad: null, suspendedActionNotice: null, queueActionNotice: 'This run is queued to resume after the work ahead.' },
+				Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }),
+				Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }),
+			]
+		}
 		if (payload.status === 201 && isObject(body) && typeof body['runId'] === 'string' && body['runId'] === runId) {
 			inspectorSession.close()
 			const reset = switchRunView(cleared, runId, null)
-			const selected: ApplicationState = { ...reset, suspendedModalOpen: false, suspendedActionNotice: null, continuation: null, resumingRunId: null, resumeSending: false, resumeNotice: null, justSubmittedRunId: runId }
+			const selected: ApplicationState = { ...reset, suspendedModalOpen: false, suspendedActionNotice: null, queueActionNotice: null, continuation: null, resumingRunId: null, resumeSending: false, resumeNotice: null, justSubmittedRunId: runId }
 			const [threadState, threadEffects] = splitActionResult(FetchTaskThread(runId)(selected))
 			return [threadState, Fetch({ url: 'api/runs', ok: GotRunList, fail: FetchFailed }), Fetch({ url: 'api/queue', ok: GotQueue, fail: FetchFailed }), ...threadEffects]
 		}
@@ -3173,6 +3244,16 @@ function SuspendedActionNoticeForState(state: ApplicationState): Vnode | null {
 	])
 }
 
+// The successful queue action confirmation: a deferred pause or a run queued behind the work ahead. It uses the same top-of-content strip so the confirmation is visible from either the watch screen or history.
+function QueueActionNoticeForState(state: ApplicationState): Vnode | null {
+	const notice = state.queueActionNotice
+	if (typeof notice !== 'string' || notice === '') return null
+	return h('div', { class: 'queue-action-notice', role: 'status' }, [
+		h('span', { class: 'queue-action-notice-text' }, notice),
+		h('button', { type: 'button', class: 'queue-action-notice-dismiss', title: 'Dismiss this notice', onclick: DismissQueueActionNotice }, 'Dismiss'),
+	])
+}
+
 // The compact lineage badge in a row's title line, and the fuller line in its expanded details. Both select the parent run without also triggering the row's own select/open handler.
 function lineageTitle(link: LineageLink): string {
 	return `Continues run ${link.runId} — ${link.label}`
@@ -3343,8 +3424,9 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summa
 		const descriptor = deriveSuspendedCard(item) ?? (summary === undefined ? undefined : deriveSuspendedCard(summary))
 		if (descriptor !== undefined) {
 			const pauseLabel = descriptor.kind === 'operator' ? 'Paused' : 'Suspended'
+			const cause = item.yielded === true ? 'Queued to resume after the work ahead' : descriptor.cause
 			children.push(h('p', { class: 'history-details-heading' }, pauseLabel))
-			children.push(h('p', { class: 'history-details-suspension' }, descriptor.cause))
+			children.push(h('p', { class: 'history-details-suspension' }, cause))
 			children.push(h('p', { class: 'history-details-suspension-time' }, `${pauseLabel} since ${descriptor.suspendedAt}`))
 		} else if (typeof item.suspendedAt === 'string' && item.suspendedAt !== '') {
 			children.push(h('p', { class: 'history-details-heading' }, 'Suspended'))
@@ -3358,7 +3440,15 @@ function QueueItemRowDetails(state: ApplicationState, item: QueueItemLike, summa
 	return h('div', { class: 'history-details' }, children)
 }
 
-// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. A needs_input row's main area opens the question modal (its question is the parked run's, and the modal is the only place to answer it); an active or suspended row selects its run, whose own history row is suppressed; a waiting row does not navigate. Only waiting rows are editable/removable/draggable; a suspended row offers Resume and Terminate instead.
+// A queued row's write-state pill: a live run's checkpoint tells the operator whether the run has started writing, and an unreadable checkpoint is said plainly rather than implied pre-write.
+function QueueWriteStatePill(item: QueueItemLike): Vnode | null {
+	const label = writeStateLabel(item)
+	if (label === null) return null
+	const stateClass = item.writeCapableStarted === false ? 'is-pre-write' : item.writeCapableStarted === true ? 'is-post-write' : 'is-unknown'
+	return h('span', { class: `queue-write-state ${stateClass}` }, label)
+}
+
+// A queued row in the merged list: history-style markup with the queue status tone in place of the run status. A needs_input row's main area opens the question modal (its question is the parked run's, and the modal is the only place to answer it); an active or suspended row selects its run, whose own history row is suppressed; a waiting row does not navigate. Waiting and pre-write paused rows are draggable; a pre-write paused row also offers defer, while every suspended row keeps Resume and Terminate.
 function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesById: Map<string, RunSummary>): Vnode {
 	const waiting = item.status === 'waiting'
 	const active = item.status === 'active'
@@ -3370,17 +3460,51 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	const runId = typeof item.runId === 'string' && item.runId !== '' ? item.runId : null
 	const summary = runId === null ? undefined : summariesById.get(runId)
 	const pauseKind = queueRowPauseKind(item, summary)
-	const operatorPaused = pauseKind === 'operator'
+	const itemOperatorPaused = isOperatorPausedItem(item)
+	const operatorPaused = itemOperatorPaused || pauseKind === 'operator'
+	const preWritePaused = isPausedPreWrite(item)
+	const postWritePaused = isPausedPostWrite(item)
+	const orderable = waiting || preWritePaused
+	const deferPending = state.queueDeferPendingId !== null
 	const mainOnclick = needsInput ? [OpenQueueQuestion, item.id] : (active || suspended) && runId !== null ? [SelectRun, runId] : undefined
+	const statusText = queueStatusText(item, pauseKind, suspensionNeedsAttention(summary, state.now))
 	const mainChildren: (Vnode | null)[] = [
-		h('span', { class: `run-status queue-status-${item.status}` }, queueStatusLabel(item.status, pauseKind, suspensionNeedsAttention(summary, state.now))),
+		h('span', { class: `run-status queue-status-${item.status}` }, statusText),
+		QueueWriteStatePill(item),
 		h('span', { class: 'history-primary' }, queueItemPrimaryText(item)),
 		link === null ? null : LineageBadge(link),
 		h('time', { class: 'history-when', title: item.queuedAt }, `queued ${formatRelative(item.queuedAt, state.now)}`),
 	]
+	if (orderable) {
+		const orderHint = runOrderHint(item, state.queueItems)
+		if (orderHint !== null) mainChildren.push(h('span', { class: 'queue-run-order-hint' }, orderHint))
+	}
 	if (waiting && !editing) {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button', title: 'Edit the task text', onclick: [StartItemEdit, item.id] }, 'Edit'))
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button', title: 'Remove the task from the queue', onclick: [RemoveQueueItem, item.id] }, 'Remove'))
+	}
+	const queuedWorkWaiting = state.queueItems.some((candidate) => candidate.status === 'waiting')
+	if (active && queuedWorkWaiting) {
+		if (item.writeCapableStarted === false) {
+			const pausePending = state.pauseRequestPendingRunId !== null
+			mainChildren.push(h('span', { class: 'queue-reorder-hint' }, 'Pre-write · Pause to reorder queued work.'))
+			mainChildren.push(h('button', { type: 'button', class: 'queue-pause-reorder-button', disabled: pausePending, title: 'Pause the active run so the queued work can be reordered', onclick: PauseActiveRunForReorder }, pausePending ? 'Pause requested…' : 'Pause to reorder'))
+		} else if (item.writeCapableStarted === true) {
+			mainChildren.push(h('span', { class: 'queue-reorder-hint' }, 'Post-write · Queued work waits until this finishes or is terminated.'))
+		} else {
+			mainChildren.push(h('span', { class: 'queue-reorder-hint' }, 'Write state unknown · Reordering queued work is unavailable.'))
+		}
+	}
+	if (preWritePaused) {
+		mainChildren.push(h('span', { class: 'queue-reorder-hint' }, 'Paused before writing — drag to reorder, or move behind queued work. Unpause starts this order.'))
+		mainChildren.push(h('button', { type: 'button', class: 'queue-defer-button', disabled: deferPending || state.resumeRunPendingId !== null || state.queueTerminatePendingId !== null, title: 'Move this paused run after all waiting work; unpause to start the new order.', onclick: DeferQueueItem(item.id) }, deferPending ? 'Moving…' : 'Move behind queued work'))
+	} else if (suspended && operatorPaused) {
+		const reason = !itemOperatorPaused
+			? 'Pause details unavailable — reordering queued work is unavailable.'
+			: postWritePaused
+				? 'Paused after writing — reordering queued work is unavailable.'
+				: 'Write state unknown — reordering queued work is unavailable.'
+		mainChildren.push(h('span', { class: 'queue-reorder-hint' }, reason))
 	}
 	if (needsInput) {
 		mainChildren.push(h('button', { type: 'button', class: 'rerun-button terminate-button', disabled: state.queueTerminatePendingId !== null, title: 'Terminate the waiting task and discard its saved context', onclick: TerminateQueueItem(item.id) }, 'Terminate'))
@@ -3389,8 +3513,8 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 		const resumePending = state.resumeRunPendingId !== null
 		const terminatePending = state.queueTerminatePendingId !== null
 		const resumeTitle = operatorPaused ? 'Resume this paused run from its saved checkpoint' : 'Resume this suspended run from its saved checkpoint'
-		mainChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': runId, disabled: resumePending || terminatePending, title: resumeTitle, onclick: ResumeSuspendedRunNow(runId) }, resumePending ? 'Resuming…' : 'Resume'))
-		mainChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': runId, disabled: terminatePending || resumePending, title: `Terminate this ${operatorPaused ? 'paused' : 'suspended'} run and discard its saved context`, onclick: TerminateSuspendedRun(runId, item.id) }, 'Terminate'))
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-resume-button', 'data-run-id': runId, disabled: resumePending || terminatePending || deferPending, title: resumeTitle, onclick: ResumeSuspendedRunNow(runId) }, resumePending ? 'Resuming…' : 'Resume'))
+		mainChildren.push(h('button', { type: 'button', class: 'suspended-terminate-button', 'data-run-id': runId, disabled: terminatePending || resumePending || deferPending, title: `Terminate this ${operatorPaused ? 'paused' : 'suspended'} run and discard its saved context`, onclick: TerminateSuspendedRun(runId, item.id) }, 'Terminate'))
 	}
 	const children: Vnode[] = [
 		h('div', { class: 'history-row-title' }, [
@@ -3401,14 +3525,14 @@ function QueueItemRow(state: ApplicationState, item: QueueItemLike, summariesByI
 	if (expanded) children.push(QueueItemRowDetails(state, item, summariesById))
 	return h('li', {
 		key: item.id,
-		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-suspended': suspended, 'is-paused': operatorPaused, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
-		// Only waiting rows drag: a drag is a reorder, and the reorder endpoint takes waiting items only.
-		draggable: waiting && !editing,
+		class: { 'history-row': true, 'queue-row': true, 'is-waiting': waiting, 'is-active': active, 'is-suspended': suspended, 'is-paused': operatorPaused, 'is-paused-prewrite': preWritePaused, 'is-orderable': orderable, 'is-needs-input': needsInput, 'is-dragging': state.draggingItemId === item.id },
+		// Waiting and operator-paused pre-write rows drag; every other row is outside the run order and is neither a source nor a target.
+		draggable: orderable && !editing,
 		'data-item-id': item.id,
-		ondragstart: DragQueueItem,
-		ondragover: DragOverQueueItem,
-		ondrop: DropQueueItem,
-		ondragend: DragEndQueueItem,
+		ondragstart: orderable ? DragQueueItem : undefined,
+		ondragover: orderable ? DragOverQueueItem : undefined,
+		ondrop: orderable ? DropQueueItem : undefined,
+		ondragend: orderable ? DragEndQueueItem : undefined,
 	}, children)
 }
 
@@ -3974,14 +4098,18 @@ function SuspendedCardForRun(state: ApplicationState): Vnode | null {
 	if (source === null) return null
 	const descriptor = deriveSuspendedCard(source.value)
 	if (descriptor === undefined) return null
+	const queueItem = state.queueItems.find((candidate) => candidate.runId === selectedRunId && candidate.status === 'suspended')
+	const cardDescriptor = queueItem !== undefined && queueItem.yielded === true
+		? { ...descriptor, cause: 'Queued to resume after the work ahead' }
+		: descriptor
 	const diagnosticsRecord = state.suspendedDiagnosticsLoad !== null && state.suspendedDiagnosticsLoad.runId === selectedRunId ? state.suspendedDiagnosticsLoad : null
 	return SuspendedCard(h, {
-		descriptor,
+		descriptor: cardDescriptor,
 		runLabel: selectedRunId,
 		runId: selectedRunId,
 		notice: state.suspendedActionNotice,
-		resumePending: state.resumeRunPendingId !== null,
-		terminatePending: state.queueTerminatePendingId !== null,
+		resumePending: state.resumeRunPendingId !== null || state.queueDeferPendingId !== null,
+		terminatePending: state.queueTerminatePendingId !== null || state.queueDeferPendingId !== null,
 		onResume: ResumeSuspendedRunNow(selectedRunId),
 		onTerminate: TerminateSuspendedRun(selectedRunId),
 		onClose: CloseSuspendedModal,
@@ -4071,7 +4199,7 @@ function Main(state: ApplicationState): Vnode {
 }
 
 function view(state: ApplicationState): Vnode {
-	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), Main(state), QuestionPromptModalForApp(state), TaskHistoryDrawerForState(state)])
+	return h('div', { class: 'app-shell' }, [TopBar(state), ProviderHealthBannerForState(state), SuspendedActionNoticeForState(state), QueueActionNoticeForState(state), Main(state), QuestionPromptModalForApp(state), TaskHistoryDrawerForState(state)])
 }
 
 // --- App -------------------------------------------------------------------
@@ -4082,7 +4210,7 @@ function isApplicationState(value: unknown): value is ApplicationState {
 	if (!isObject(value)) return false
 	const stateKeys: (keyof ApplicationState)[] = [
 		'summaries', 'selectedRunId', 'selectedRunView', 'selectedRunStatus', 'pendingQuestions', 'providerHealth',
-		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'pendingResumeItemId',
+		'queueItems', 'justSubmittedItemId', 'pendingAddSelectionId', 'editingItemId', 'draggingItemId', 'queueAnswerPendingId', 'queueTerminatePendingId', 'queueDeferPendingId', 'queueActionNotice', 'pendingResumeItemId',
 		'serverAvailable', 'versions', 'justSubmittedRunId', 'createSending', 'muted', 'shownQuestionIds', 'firstQuestionsPoll', 'pendingAnswerId',
 		'runEffort', 'savingEffort', 'runInvolvement', 'savingInvolvement', 'runLogLevel', 'savingLogLevel',
 		'flowModel', 'previousFlowModel', 'flowFeed', 'runListFeed', 'runListLoaded', 'queueLoaded', 'labelResolver', 'guildParticipants', 'build',
@@ -4118,6 +4246,8 @@ app({
 			draggingItemId: null,
 			queueAnswerPendingId: null,
 			queueTerminatePendingId: null,
+			queueDeferPendingId: null,
+			queueActionNotice: null,
 			pendingResumeItemId: null,
 			serverAvailable: true,
 			versions: {},

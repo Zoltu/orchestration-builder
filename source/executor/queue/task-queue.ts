@@ -3,7 +3,7 @@ import { questionFromParkSummary, type ParkedAnswer, type PauseState } from '../
 import type { ListRunIds, ReadRunMetaById } from '../persistence.js'
 import { isRunMeta, isTerminalRunStatus, safeJsonParse } from '../validation.js'
 import type { EffortLevel, InvolvementLevel, LogLevel, RunContinuation, RunMeta } from '../types.js'
-import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, reactivateSuspendedItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderWaitingItem, repairActiveItem, repairNeedsInputItem, repairSuspendedItem, requireWaitingItem, requeueErrorItem, settleActiveItem, suspendActiveItem, terminateNeedsInputItem, terminateSuspendedItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
+import { assembleBriefingLines, cancelWaitingItem, dispatchingItem, editWaitingItem, enqueueAtHead, enqueueAtTail, normalizeNewItem, pendingAnswerUndelivered, reactivateErrorItem, reactivateSuspendedItem, recordAnswer, releaseToWaiting, removeWaitingItem, reorderRunOrderItem, repairActiveItem, repairNeedsInputItem, repairSuspendedItem, requireWaitingItem, requeueErrorItem, settleActiveItem, suspendActiveItem, terminateNeedsInputItem, terminateSuspendedItem, toQueueItemView, toQueueView, withReplacedItem, type QueueItem, type QueueItemView, type QueueMutation, type QueueView, type RunListEntry, type TaskQueue } from './model.js'
 import { readQueue, writeQueue, type QueueStore } from './persistence.js'
 
 // The durable task queue module (docs/queueing.md "The queue: storage, item model, state machine" and "Dispatch and the scheduler"): the single public surface over the item model, the state machine, queue persistence, and the scheduler that dispatches queued tasks and settles their runs. HTTP handlers and the error-resume path call operations here rather than reading, mutating, and writing the queue file themselves, so the crash-safety ordering (dispatching marker before submit, boot repair, collision retry, settlement mapping) cannot be bypassed.
@@ -25,6 +25,16 @@ export type SubmitQueuedRun = (submission: QueuedRunSubmission) => QueuedRunSubm
 
 // The pause-state reader: returns the pause a run's checkpoint carries (a parked ask or a direct clarification finish), or null when the run has no checkpoint (delivered, missing, or corrupt).
 export type ReadPauseStateById = (runId: string) => PauseState | null
+
+// The write-state reader: true once a write-capable role has started, false while pre-write, and null when the checkpoint is missing, corrupt, or names another run.
+export type ReadWriteCapableStartedById = (runId: string) => boolean | null
+
+export type ResumeYieldedRunResult =
+	| { ok: true; runId: string }
+	| { ok: false; error: 'run_in_progress' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found' | 'pause_intent_clear_failed' }
+
+// The submission layer's same-run resume of a yielded operator pause; it never re-activates the queue item, because the scheduler already wrote its yielded active marker.
+export type ResumeYieldedRun = (runId: string, note?: string) => ResumeYieldedRunResult
 
 export type ResumeParkedRunResult =
 	| { ok: true; runId: string }
@@ -60,6 +70,10 @@ export interface TaskQueueDependencies {
 	readRunListSummary: (runId: string) => RunListEntry
 	// The pause-state reader: answer uses it to learn whether the answer replaces a parked tool result or re-enters as a clarification note, boot repair uses it to tell a delivered answer from an undelivered one, and settlement uses it to detect a re-park.
 	readPauseStateById: ReadPauseStateById
+	// The write-state reader: reorder and defer admit an operator-paused suspended item only while the run is still pre-write.
+	readWriteCapableStartedById: ReadWriteCapableStartedById
+	// The same-run yielded-pause resume, supplied by the submission layer: the scheduler calls it when a yielded item reaches the head and keeps the item active on success.
+	resumeYieldedRun: ResumeYieldedRun
 	// The same-run parked-answer resume, supplied by the submission layer: the queue decides when to re-enter a parked run and falls back to a briefed dispatch when it cannot.
 	resumeParkedRun: QueueResumeParkedRun
 	// The same-run clarification-answer resume, supplied by the submission layer: it re-enters a direct-finish needs_clarification run and falls back like the parked path when it cannot.
@@ -89,10 +103,10 @@ export interface QueueHandles {
 	queuedAt: string
 }
 
-// Where an enqueued item enters the file order; the scheduler dispatches the first waiting item.
+// Where an enqueued item enters the file order; the scheduler considers waiting items and yielded suspended items in that order.
 export type QueuePlacement = 'head' | 'tail'
 
-// The operator-editable fields of a waiting item. Position reorders it within the waiting sublist, clamping out-of-range values; an empty patch validates the item without writing.
+// The operator-editable fields of a waiting item. Position reorders any orderable item within the run order, clamping out-of-range values; an empty patch validates the item without writing.
 export interface QueuePatchInput {
 	task?: string
 	effort?: EffortLevel
@@ -125,7 +139,7 @@ export type QueueSubmitOutcome =
 // - read(): the current file-order items, head first.
 // - enqueue(input, handles, placement): validates an operator body, writes a new waiting item at the head or tail, then ticks the scheduler; a malformed body writes nothing and returns 'invalid_body'.
 // - submitNow(input, handles): the POST /api/runs path; refuses while a run is active with 'busy', while a paused run has priority with 'run_suspended' (provider) or 'run_paused' (operator), or while the provider gate blocks dispatch with 'provider_unavailable' before enqueueing; otherwise it enqueues at the head and dispatches in the same call. A collision that exhausts the retry budget removes the just-created waiting item and returns 'collision'; a slot that becomes busy after the attempt keeps the item waiting and returns 'busy'.
-// - patch(id, patch): edits task/effort/involvement and/or reorders within the waiting list; unknown ids return 'not_found', non-waiting items 'forbidden_status'. An empty patch validates without writing.
+// - patch(id, patch): edits task/effort/involvement on a waiting item and/or reorders an orderable item within the run order; unknown ids return 'not_found', non-orderable items 'forbidden_status'. An empty patch validates without writing.
 // - cancel(id, at): marks a waiting item cancelled with settledAt; unknown ids 'not_found', non-waiting items 'forbidden_status'.
 // - terminate(id, at): cancels a needs_input or suspended item and, when it names the corresponding run, terminalizes that run and deletes its checkpoint; a run already gone ('not_found'/'not_paused') still cancels the item. Unknown ids 'not_found', other statuses 'forbidden_status'.
 // - answer(id, answer): records an answer (with a durable answer id) on a needs_input item, moves it to the front as waiting, and ticks; a parked checkpoint whose question still matches records the run and tool call, a clarification checkpoint whose meta question still matches records just the run, and either dispatch resumes the same run; an item with no matching checkpoint falls back to the briefed continuation; its lineage is re-pointed at the paused run when that run is known, otherwise the item keeps its existing lineage. An item whose own run is already terminal but not paused (an operator termination) is cancelled, its checkpoint cleanup and audit append retried, and the answer discarded instead of dispatching. Unknown ids 'not_found', other statuses 'forbidden_status'.
@@ -134,7 +148,7 @@ export type QueueSubmitOutcome =
 // - reactivateSuspendedItem(runId): puts the suspended item for a resumed run back into the active slot under the same run id; returns 'not_found' when no suspended item names that run.
 // - terminateSuspendedRun(runId, at): the run-level operator termination; terminalizes a suspended run, cancels any suspended item bound to it, and ticks so waiting work can dispatch once the pause is released.
 // - discardSuspendedRun(runId, reason?): terminalizes the run and cancels its suspended item when resume can never succeed, then ticks dispatch.
-// - tick(): repairs stale active and suspended items from their run metas and cancels needs_input items whose run was terminated before the queue write. The general paused-run binding (a provider suspension or an operator pause) blocks every waiting item; automatic resume belongs to the provider-recovery coordinator, not the queue. With no pause, the head waiting item dispatches only while the provider gate permits dispatch. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the briefed dispatch with its lineage re-pointed at the unresumable run.
+// - tick(): repairs stale active and suspended items from their run metas and cancels needs_input items whose run was terminated before the queue write. The general paused-run binding (a provider suspension or an operator pause) blocks every waiting item; automatic resume belongs to the provider-recovery coordinator, not the queue. With no pause, the first waiting or yielded suspended item in the run order dispatches only while the provider gate permits dispatch. An answered item resumes its paused run through the parked-answer path when it carries a tool-call pointer, or the clarification-answer path otherwise; when that run cannot be resumed the item falls back to the briefed dispatch with its lineage re-pointed at the unresumable run.
 // - onRunSettled(meta): maps a settled run from its terminal meta, writes the mapping before ticking, and never settles an 'interrupted' meta (that item re-dispatches through boot repair). A suspended meta maps the active item to suspended without ticking, because the paused run retains priority. A needs_clarification settlement whose answer is still undelivered (either pause kind) releases the item to waiting and ticks instead of settling, so the answer retries.
 // - observeShutdown(): closes the dispatch gate; settlements still map but no new run starts.
 export interface TaskQueueModule {
@@ -143,11 +157,17 @@ export interface TaskQueueModule {
 	submitNow(input: unknown, handles: QueueHandles): Promise<QueueSubmitOutcome>
 	patch(id: string, patch: QueuePatchInput): QueueMutationOutcome
 	cancel(id: string, at: string): QueueMutationOutcome
+	// Moves an operator-paused pre-write suspended item to the end of the run order, writes, and ticks.
+	defer(id: string): Promise<QueueMutationOutcome>
+	// True when waiting or yielded work sits ahead of the run's item in file order.
+	hasRunnableWorkAheadOfRun(runId: string): boolean
+	// Marks the run's suspended item yielded so waiting work can dispatch first; false when no suspended item names the run.
+	yieldPausedRun(runId: string, note?: string): boolean
 	terminate(id: string, at: string): Promise<QueueMutationOutcome>
 	answer(id: string, answer: string): Promise<QueueMutationOutcome>
 	requeue(id: string): Promise<QueueMutationOutcome>
 	reactivateErrorItem(runId: string): QueueMutationOutcome
-	reactivateSuspendedItem(runId: string): QueueMutationOutcome
+	reactivateSuspendedItem(runId: string, preserveYield?: boolean): QueueMutationOutcome
 	// The run-level termination path: terminalizes the suspended run even when no queue item exists, cancels any suspended item bound to it, and ticks after the pause is released. Status gating lives in the caller; the result is the termination operation's own.
 	terminateSuspendedRun(runId: string, at: string): Promise<TerminatePausedRunResult>
 	// Cancels the suspended item for a run whose automatic resume can never succeed; the recovery coordinator has already released the pause and terminalizes the run through terminatePausedRun.
@@ -177,6 +197,29 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 	function writeQueueState(queue: TaskQueue): void {
 		writeQueue(dependencies.queueStore, queue)
 		dependencies.notifyStateChanged()
+	}
+
+	// The operator-paused lazy check: a suspended item is orderable only while its run meta still names an operator pause; provider suspensions and unknown metas are not.
+	function isOperatorPausedSuspended(item: QueueItem): boolean {
+		if (item.status !== 'suspended' || item.runId === undefined) return false
+		const meta = parseRunMetaText(item.runId)
+		return meta !== null && meta.status === 'suspended' && meta.pause !== undefined
+	}
+
+	// The run order is the waiting items plus the operator-paused pre-write suspended items; the write-state leaf keeps a post-write pause fixed in place, and an unknown state is refused rather than guessed.
+	function runOrderIds(queue: TaskQueue): ReadonlySet<string> {
+		const ids = new Set<string>()
+		for (const item of queue.items) {
+			if (item.status === 'waiting') {
+				ids.add(item.id)
+				continue
+			}
+			if (!isOperatorPausedSuspended(item)) continue
+			if (item.runId === undefined) continue
+			if (dependencies.readWriteCapableStartedById(item.runId) !== false) continue
+			ids.add(item.id)
+		}
+		return ids
 	}
 
 	function read(): QueueView {
@@ -358,17 +401,62 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		return fallbackFromAnsweredItem(item, resumeRunId)
 	}
 
+	// Re-enters a yielded operator pause under its own run id: the active marker keeps the yield only through the pre-resume crash window, so boot repair can recognize it, and is cleared immediately once the resume is accepted. A transient slot conflict restores the suspended+yielded item; an unresumable run is terminalized and its item cancelled exactly as an automatic resume does. The boolean tells the dispatcher whether the item was cancelled and the next head should be considered.
+	async function resumeYieldedItem(item: QueueItem, view: TaskQueue): Promise<boolean> {
+		const runId = item.runId
+		if (runId === undefined) return false
+		const activation = reactivateSuspendedItem(view, runId, true)
+		if (!activation.ok) return false
+		writeQueueState(activation.queue)
+		const result = dependencies.resumeYieldedRun(runId, item.resumeNote)
+		if (result.ok) {
+			const current = readQueueState()
+			const currentItem = current.items.find((entry) => entry.id === item.id)
+			if (currentItem === undefined || currentItem.status !== 'active' || currentItem.runId !== runId) return false
+			const cleared: QueueItem = { ...currentItem }
+			delete cleared.yielded
+			delete cleared.resumeNote
+			delete cleared.yieldedPauseAt
+			writeQueueState(withReplacedItem(current, cleared))
+			return false
+		}
+		if (result.error === 'run_in_progress' || result.error === 'run_suspended' || result.error === 'run_paused' || result.error === 'pause_intent_clear_failed') {
+			const current = readQueueState()
+			const currentItem = current.items.find((entry) => entry.id === item.id)
+			if (currentItem === undefined || currentItem.status !== 'active' || currentItem.runId !== runId) return false
+			const restored: QueueItem = { ...currentItem, status: 'suspended', ...(item.suspendedAt !== undefined ? { suspendedAt: item.suspendedAt } : {}), yielded: true, ...(item.resumeNote !== undefined ? { resumeNote: item.resumeNote } : {}), ...(item.yieldedPauseAt !== undefined ? { yieldedPauseAt: item.yieldedPauseAt } : {}) }
+			writeQueueState(withReplacedItem(current, restored))
+			return false
+		}
+		dependencies.terminatePausedRun(runId)
+		const current = readQueueState()
+		const currentItem = current.items.find((entry) => entry.id === item.id)
+		if (currentItem === undefined || currentItem.status !== 'active' || currentItem.runId !== runId) return false
+		const suspendedMarker: QueueItem = { ...currentItem, status: 'suspended', ...(item.suspendedAt !== undefined ? { suspendedAt: item.suspendedAt } : {}), yielded: true, ...(item.resumeNote !== undefined ? { resumeNote: item.resumeNote } : {}), ...(item.yieldedPauseAt !== undefined ? { yieldedPauseAt: item.yieldedPauseAt } : {}) }
+		const cancelled = terminateSuspendedItem(withReplacedItem(current, suspendedMarker), item.id, dependencies.now())
+		if (cancelled.ok) writeQueueState(cancelled.queue)
+		return true
+	}
+
 	async function dispatchHead(): Promise<void> {
-		const view = readQueueState()
-		const head = view.items.find((item) => item.status === 'waiting')
-		if (head === undefined) return
-		if (head.resumeRunId !== undefined && head.answer !== undefined) {
-			const attempt = await resumeAnsweredItem(head, view)
-			if (attempt.kind === 'done' || attempt.kind === 'released') return
-			await submitHead(attempt.item, attempt.view)
+		for (;;) {
+			const view = readQueueState()
+			const head = view.items.find((item) => item.status === 'waiting' || (item.status === 'suspended' && item.yielded === true))
+			if (head === undefined) return
+			if (head.status === 'suspended') {
+				const cancelled = await resumeYieldedItem(head, view)
+				if (!cancelled) return
+				continue
+			}
+			if (head.resumeRunId !== undefined && head.answer !== undefined) {
+				const attempt = await resumeAnsweredItem(head, view)
+				if (attempt.kind === 'done' || attempt.kind === 'released') return
+				await submitHead(attempt.item, attempt.view)
+				return
+			}
+			await submitHead(head, view)
 			return
 		}
-		await submitHead(head, view)
 	}
 
 	// One dispatch attempt: repair stale active and suspended items (the boot rows of the state machine). The general paused-run binding (provider suspension or operator pause) keeps every waiting item blocked; the recovery coordinator owns automatic resume and reports health changes that call this tick. With no pause, waiting work dispatches only while the provider gate permits. Async only on the collision-retry path, whose sleep ends one read-modify-write cycle and whose retry begins a fresh one.
@@ -376,7 +464,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 		repairPass()
 		if (shutdownObserved || dependencies.hasActiveRun() || dependencies.hasSuspendedRun()) return
 		if (!dependencies.canDispatch()) {
-			if (readQueueState().items.some((item) => item.status === 'waiting')) dependencies.ensureProviderProbe()
+			if (readQueueState().items.some((item) => item.status === 'waiting' || (item.status === 'suspended' && item.yielded === true))) dependencies.ensureProviderProbe()
 			return
 		}
 		await dispatchHead()
@@ -424,7 +512,7 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 				item = edited.item
 			}
 			if (patch.position !== undefined) {
-				const reordered = reorderWaitingItem(queue, id, patch.position)
+				const reordered = reorderRunOrderItem(queue, id, patch.position, runOrderIds(queue))
 				if (!reordered.ok) return toMutationOutcome(reordered)
 				queue = reordered.queue
 				item = reordered.item
@@ -436,6 +524,34 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			}
 			writeQueueState(queue)
 			return { ok: true, item: toQueueItemView(item) }
+		},
+		async defer(id) {
+			const queue = readQueueState()
+			const target = queue.items.find((item) => item.id === id)
+			if (target === undefined) return { ok: false, reason: 'not_found' }
+			if (target.status !== 'suspended') return { ok: false, reason: 'forbidden_status' }
+			const orderableIds = runOrderIds(queue)
+			if (!orderableIds.has(id)) return { ok: false, reason: 'forbidden_status' }
+			// The end of the run order is after every other orderable item, i.e. after all waiting items (and any other operator-paused pre-write item).
+			const deferred = reorderRunOrderItem(queue, id, orderableIds.size - 1, orderableIds)
+			if (!deferred.ok) return toMutationOutcome(deferred)
+			writeQueueState(deferred.queue)
+			await tick()
+			const current = readQueueState().items.find((item) => item.id === id)
+			return { ok: true, item: toQueueItemView(current ?? deferred.item) }
+		},
+		hasRunnableWorkAheadOfRun(runId) {
+			const queue = readQueueState()
+			const index = queue.items.findIndex((item) => item.status === 'suspended' && item.runId === runId)
+			if (index < 0) return false
+			return queue.items.slice(0, index).some((item) => item.status === 'waiting' || (item.status === 'suspended' && item.yielded === true))
+		},
+		yieldPausedRun(runId, note) {
+			const queue = readQueueState()
+			const target = queue.items.find((item) => item.status === 'suspended' && item.runId === runId)
+			if (target === undefined) return false
+			writeQueueState(withReplacedItem(queue, { ...target, yielded: true, yieldedPauseAt: target.suspendedAt, ...(note !== undefined ? { resumeNote: note } : {}) }))
+			return true
 		},
 		cancel(id, at) {
 			const result = cancelWaitingItem(readQueueState(), id, at)
@@ -501,8 +617,8 @@ export function createTaskQueue(dependencies: TaskQueueDependencies): TaskQueueM
 			if (result.ok) writeQueueState(result.queue)
 			return toMutationOutcome(result)
 		},
-		reactivateSuspendedItem(runId) {
-			const result = reactivateSuspendedItem(readQueueState(), runId)
+		reactivateSuspendedItem(runId, preserveYield) {
+			const result = reactivateSuspendedItem(readQueueState(), runId, preserveYield)
 			if (result.ok) writeQueueState(result.queue)
 			return toMutationOutcome(result)
 		},

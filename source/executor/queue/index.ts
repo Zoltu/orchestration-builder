@@ -1,4 +1,5 @@
 export { createTaskQueue } from './task-queue.js'
+export { isRunQueuedForResume } from './model.js'
 export type {
 	QueueEnqueueOutcome,
 	QueueHandles,
@@ -11,8 +12,11 @@ export type {
 	QueuedRunSubmission,
 	QueuedRunSubmitResult,
 	ReadPauseStateById,
+	ReadWriteCapableStartedById,
 	ResumeClarificationRunResult,
 	ResumeParkedRunResult,
+	ResumeYieldedRun,
+	ResumeYieldedRunResult,
 	SubmitQueuedRun,
 	TaskQueueDependencies,
 	TaskQueueModule,

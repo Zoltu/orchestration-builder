@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createTaskQueue, type QueueItemView, type QueueView, type ResumeClarificationRunResult, type ResumeParkedRunResult, type TerminatePausedRunResult } from './index.ts'
-import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, releaseToWaiting, suspendActiveItem, toQueueItemView, type QueueItem } from './model.ts'
+import { cancelWaitingItem, dispatchingItem, isQueueItem, pendingAnswerUndelivered, reactivateSuspendedItem, releaseToWaiting, suspendActiveItem, terminateSuspendedItem, toQueueItemView, type QueueItem } from './model.ts'
 import { readQueue, writeQueue } from './persistence.ts'
 import type { ParkedAsk, PauseState } from '../park-state.js'
 import type { RunContinuation, RunMeta } from '../types.js'
@@ -21,6 +21,8 @@ interface QueueSeedItem extends QueueItemView {
 	resumeRunId?: string
 	resumeToolCallId?: string
 	answerId?: string
+	resumeNote?: string
+	yieldedPauseAt?: string
 }
 
 interface QueuedRunSubmission {
@@ -87,7 +89,7 @@ function suspendedMeta(runId: string): RunMeta {
 	}
 }
 
-function suspendedItem(overrides: Partial<QueueItemView> = {}): QueueItemView {
+function suspendedItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
 	return item({ status: 'suspended', runId: 'run-20260101-010000', suspendedAt: SUSPENDED_AT, ...overrides })
 }
 
@@ -125,6 +127,7 @@ interface QueueHarness {
 	clarificationResumeCalls: Array<{ runId: string; id: string; question: string; answer: string }>
 	terminateCalls: string[]
 	pauseReadCalls: string[]
+	resumeYieldedCalls: string[]
 	notifications: () => number
 }
 
@@ -137,7 +140,7 @@ function pauseStateOf(seed: PauseSeed | undefined): PauseState | null {
 	return { kind: 'parked_ask', ask: seed }
 }
 
-function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, hasSuspendedRun?: () => boolean, pausedRunKind?: () => 'provider' | 'operator' | undefined, canDispatch?: () => boolean, ensureProviderProbe?: () => void, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminatePausedRunResult[] } = {}): QueueHarness {
+function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedRunSubmitResult[], hasActiveRun?: () => boolean, hasSuspendedRun?: () => boolean, pausedRunKind?: () => 'provider' | 'operator' | undefined, canDispatch?: () => boolean, ensureProviderProbe?: () => void, metas?: Record<string, RunMeta>, runs?: RunListEntry[], pauseStates?: Record<string, PauseSeed>, resumeResults?: ResumeParkedRunResult[], clarificationResumeResults?: ResumeClarificationRunResult[], terminateResults?: TerminatePausedRunResult[], writeStates?: Record<string, boolean | null>, resumeYieldedResults?: Array<{ ok: true; runId: string } | { ok: false; error: 'run_in_progress' | 'run_suspended' | 'run_paused' | 'checkpoint_missing' | 'run_not_resumable' | 'run_not_found' | 'pause_intent_clear_failed' }> } = {}): QueueHarness {
 	const store = fakeQueueStore(options.initial ?? [])
 	const scripted = [...(options.submitResults ?? [])]
 	const submitCalls: QueuedRunSubmission[] = []
@@ -155,6 +158,8 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 	const terminateScript = [...(options.terminateResults ?? [])]
 	const terminateCalls: string[] = []
 	const pauseReadCalls: string[] = []
+	const resumeYieldedScript = [...(options.resumeYieldedResults ?? [])]
+	const resumeYieldedCalls: string[] = []
 	let notificationCount = 0
 	const queue = createTaskQueue({
 		queueStore: store.store,
@@ -174,6 +179,11 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 		readPauseStateById: (runId) => {
 			pauseReadCalls.push(runId)
 			return pauseStateOf(options.pauseStates?.[runId])
+		},
+		readWriteCapableStartedById: (runId) => options.writeStates?.[runId] ?? null,
+		resumeYieldedRun: (runId) => {
+			resumeYieldedCalls.push(runId)
+			return resumeYieldedScript.shift() ?? { ok: true, runId }
 		},
 		resumeParkedRun: (runId, parkedAnswer) => {
 			resumeCalls.push({ runId, parkedAnswer })
@@ -197,7 +207,7 @@ function makeQueue(options: { initial?: QueueSeedItem[], submitResults?: QueuedR
 		now: () => NOW,
 		generateAnswerId: () => 'answer-1',
 	})
-	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls, pauseReadCalls, notifications: () => notificationCount }
+	return { queue, writes: store.writes, items: store.items, written: store.written, submitCalls, resumeCalls, clarificationResumeCalls, terminateCalls, pauseReadCalls, resumeYieldedCalls, notifications: () => notificationCount }
 }
 
 describe('enqueue', () => {
@@ -1251,5 +1261,189 @@ describe('state invalidation notifications', () => {
 		expect(await harness.queue.submitNow({ task: 'new task' }, handles)).toEqual({ kind: 'busy' })
 
 		expect(harness.notifications()).toBe(0)
+	})
+})
+
+describe('yielded operator pauses', () => {
+	const RUN_ID = 'run-20260101-010000'
+	const OPERATOR_PAUSE = { message: 'The operator paused this run.', pausedAt: SUSPENDED_AT }
+
+	function operatorPausedMeta(runId: string): RunMeta {
+		return { runId, task: 'fix the parser bug', status: 'suspended', startTime: '2026-01-01T00:30:00.000Z', pause: OPERATOR_PAUSE }
+	}
+
+	function operatorPausedItem(overrides: Partial<QueueSeedItem> = {}): QueueSeedItem {
+		return suspendedItem({ runId: RUN_ID, ...overrides })
+	}
+
+	function operatorQueue(initial: QueueItemView[], options: { writeState?: boolean | null, meta?: RunMeta } = {}): QueueHarness {
+		return makeQueue({
+			initial,
+			metas: { [RUN_ID]: options.meta ?? operatorPausedMeta(RUN_ID) },
+			writeStates: { [RUN_ID]: options.writeState === undefined ? false : options.writeState },
+			hasActiveRun: () => true,
+		})
+	}
+
+	test('yielded is valid only on suspended and active items', () => {
+		const suspended = { id: 'item-1', task: 'fix the parser bug', status: 'suspended', runId: RUN_ID, queuedAt: NOW, suspendedAt: SUSPENDED_AT, yielded: true }
+		expect(isQueueItem(suspended)).toBe(true)
+		expect(isQueueItem({ ...suspended, status: 'active', suspendedAt: undefined })).toBe(true)
+		for (const status of ['waiting', 'needs_input', 'done', 'error', 'cancelled']) {
+			expect(isQueueItem({ ...suspended, status })).toBe(false)
+		}
+		expect(isQueueItem({ ...suspended, yielded: false })).toBe(false)
+		expect(isQueueItem({ ...suspended, yielded: 'yes' })).toBe(false)
+		// The transient active marker must still name its run.
+		expect(isQueueItem({ ...suspended, status: 'active', suspendedAt: undefined, runId: undefined })).toBe(false)
+		// A resume note rides only the yielded pause (whether suspended or transiently active).
+		expect(isQueueItem({ ...suspended, resumeNote: 'carry on' })).toBe(true)
+		expect(isQueueItem({ ...suspended, status: 'active', suspendedAt: undefined, resumeNote: 'carry on' })).toBe(true)
+		expect(isQueueItem({ ...suspended, yielded: undefined, resumeNote: 'carry on' })).toBe(false)
+		expect(isQueueItem({ ...suspended, resumeNote: '' })).toBe(false)
+	})
+
+	test('a yielded suspended item round-trips through the queue read model and persistence', () => {
+		const harness = makeQueue({ initial: [operatorPausedItem({ yielded: true })] })
+
+		expect(harness.queue.read().items[0]?.yielded).toBe(true)
+		expect(harness.items()[0]?.yielded).toBe(true)
+	})
+
+	test('yielded is dropped on release, cancellation, and settlement, and an explicit reactivation clears it immediately', () => {
+		const suspended: QueueItem = { id: 'item-1', task: 'fix the parser bug', status: 'suspended', runId: RUN_ID, queuedAt: NOW, suspendedAt: SUSPENDED_AT, yielded: true, resumeNote: 'carry on', yieldedPauseAt: SUSPENDED_AT }
+		const queue = { version: 1 as const, items: [suspended] }
+
+		expect(releaseToWaiting(suspended).yielded).toBeUndefined()
+		expect(releaseToWaiting(suspended).resumeNote).toBeUndefined()
+		expect(releaseToWaiting(suspended).yieldedPauseAt).toBeUndefined()
+		const cancelled = terminateSuspendedItem(queue, suspended.id, NOW)
+		expect(cancelled.ok).toBe(true)
+		if (cancelled.ok) {
+			expect(cancelled.item.yielded).toBeUndefined()
+			expect(cancelled.item.resumeNote).toBeUndefined()
+			expect(cancelled.item.yieldedPauseAt).toBeUndefined()
+		}
+		const explicit = reactivateSuspendedItem(queue, RUN_ID)
+		expect(explicit.ok).toBe(true)
+		if (explicit.ok) {
+			expect(explicit.item.yielded).toBeUndefined()
+			expect(explicit.item.resumeNote).toBeUndefined()
+			expect(explicit.item.yieldedPauseAt).toBeUndefined()
+		}
+		const preserved = reactivateSuspendedItem(queue, RUN_ID, true)
+		expect(preserved.ok).toBe(true)
+		if (preserved.ok) {
+			expect(preserved.item.yielded).toBe(true)
+			expect(preserved.item.resumeNote).toBe('carry on')
+			expect(preserved.item.yieldedPauseAt).toBe(SUSPENDED_AT)
+		}
+		const active: QueueItem = { id: 'item-1', task: 'fix the parser bug', status: 'active', runId: RUN_ID, queuedAt: NOW, yielded: true, resumeNote: 'carry on', yieldedPauseAt: SUSPENDED_AT }
+		const suspension = suspendActiveItem({ version: 1 as const, items: [active] }, RUN_ID, NOW)
+		expect(suspension.kind).toBe('suspended')
+		if (suspension.kind === 'suspended') {
+			expect(suspension.item.yielded).toBeUndefined()
+			expect(suspension.item.resumeNote).toBeUndefined()
+			expect(suspension.item.yieldedPauseAt).toBeUndefined()
+		}
+	})
+
+	test('the queue explicit reactivation clears yielded, resumeNote, and yieldedPauseAt immediately', () => {
+		const harness = makeQueue({ initial: [operatorPausedItem({ id: 's1', yielded: true, resumeNote: 'carry on', yieldedPauseAt: SUSPENDED_AT })] })
+
+		expect(harness.queue.reactivateSuspendedItem(RUN_ID)).toMatchObject({ ok: true, item: { id: 's1', status: 'active' } })
+		const stored = JSON.parse(harness.writes.at(-1) ?? '{}') as { items: Array<Record<string, unknown>> }
+		const item = stored.items.find((entry) => entry.id === 's1')
+		expect(item).toMatchObject({ status: 'active', runId: RUN_ID })
+		expect(item !== undefined && 'yielded' in item).toBe(false)
+		expect(item !== undefined && 'resumeNote' in item).toBe(false)
+		expect(item !== undefined && 'yieldedPauseAt' in item).toBe(false)
+	})
+
+	test('reorders waiting and operator-paused pre-write suspended items by run-order position', () => {
+		const harness = operatorQueue([
+			item({ id: 'w1', task: 'one' }),
+			operatorPausedItem({ id: 's1' }),
+			item({ id: 'w2', task: 'two' }),
+		])
+
+		expect(harness.queue.patch('s1', { position: 0 })).toMatchObject({ ok: true, item: { id: 's1' } })
+		expect(harness.items().map((entry) => entry.id)).toEqual(['s1', 'w1', 'w2'])
+		expect(harness.queue.patch('w2', { position: 1 })).toMatchObject({ ok: true, item: { id: 'w2' } })
+		expect(harness.items().map((entry) => entry.id)).toEqual(['s1', 'w2', 'w1'])
+	})
+
+	test('refuses a post-write, provider-suspended, or unknown-write-state item', () => {
+		const postWrite = operatorQueue([operatorPausedItem({ id: 's1' })], { writeState: true })
+		expect(postWrite.queue.patch('s1', { position: 0 })).toEqual({ ok: false, reason: 'forbidden_status' })
+
+		const provider = makeQueue({
+			initial: [operatorPausedItem({ id: 's1' })],
+			metas: { [RUN_ID]: suspendedMeta(RUN_ID) },
+			writeStates: { [RUN_ID]: false },
+		})
+		expect(provider.queue.patch('s1', { position: 0 })).toEqual({ ok: false, reason: 'forbidden_status' })
+
+		const unknown = makeQueue({
+			initial: [operatorPausedItem({ id: 's1' })],
+			metas: { [RUN_ID]: operatorPausedMeta(RUN_ID) },
+			writeStates: { [RUN_ID]: null },
+		})
+		expect(unknown.queue.patch('s1', { position: 0 })).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+
+	test('defers an operator-paused pre-write item to the end of the run order', async () => {
+		const harness = operatorQueue([
+			operatorPausedItem({ id: 's1' }),
+			item({ id: 'w1', task: 'one' }),
+			item({ id: 'w2', task: 'two' }),
+		])
+
+		expect(await harness.queue.defer('s1')).toMatchObject({ ok: true, item: { id: 's1' } })
+		expect(harness.items().map((entry) => entry.id)).toEqual(['w1', 'w2', 's1'])
+	})
+
+	test('defer refuses an unknown id, a waiting item, and a post-write pause', async () => {
+		const harness = operatorQueue([
+			operatorPausedItem({ id: 's1' }),
+			item({ id: 'w1' }),
+		])
+		expect(await harness.queue.defer('ghost')).toEqual({ ok: false, reason: 'not_found' })
+		expect(await harness.queue.defer('w1')).toEqual({ ok: false, reason: 'forbidden_status' })
+
+		const postWrite = operatorQueue([operatorPausedItem({ id: 's1' })], { writeState: true })
+		expect(await postWrite.queue.defer('s1')).toEqual({ ok: false, reason: 'forbidden_status' })
+
+		const unknown = operatorQueue([operatorPausedItem({ id: 's1' })], { writeState: null })
+		expect(await unknown.queue.defer('s1')).toEqual({ ok: false, reason: 'forbidden_status' })
+	})
+
+	test('hasRunnableWorkAheadOfRun counts earlier waiting and yielded items only', () => {
+		const aheadWaiting = makeQueue({ initial: [item({ id: 'w1' }), operatorPausedItem({ id: 's1' })] })
+		expect(aheadWaiting.queue.hasRunnableWorkAheadOfRun(RUN_ID)).toBe(true)
+
+		const behind = makeQueue({ initial: [operatorPausedItem({ id: 's1' }), item({ id: 'w1' })] })
+		expect(behind.queue.hasRunnableWorkAheadOfRun(RUN_ID)).toBe(false)
+
+		const aheadYielded = makeQueue({ initial: [suspendedItem({ id: 's0', runId: 'run-20260101-020000', yielded: true }), operatorPausedItem({ id: 's1' })] })
+		expect(aheadYielded.queue.hasRunnableWorkAheadOfRun(RUN_ID)).toBe(true)
+
+		expect(behind.queue.hasRunnableWorkAheadOfRun('run-ghost')).toBe(false)
+
+		// Only the run's suspended item anchors the run order: an active item with work ahead is not a paused run.
+		const noSuspended = makeQueue({ initial: [item({ id: 'w1' }), item({ id: 'a1', status: 'active', runId: RUN_ID })] })
+		expect(noSuspended.queue.hasRunnableWorkAheadOfRun(RUN_ID)).toBe(false)
+
+		const mismatched = makeQueue({ initial: [suspendedItem({ id: 'other', runId: 'run-20260101-030000' }), item({ id: 'w1' })] })
+		expect(mismatched.queue.hasRunnableWorkAheadOfRun(RUN_ID)).toBe(false)
+	})
+
+	test('yieldPausedRun marks only the matching suspended item and persists the yield', () => {
+		const harness = makeQueue({ initial: [operatorPausedItem({ id: 's1' })] })
+
+		expect(harness.queue.yieldPausedRun(RUN_ID, 'wait for the queue')).toBe(true)
+		expect(harness.items()[0]?.yielded).toBe(true)
+		expect(JSON.parse(harness.writes.at(-1) ?? '{}')).toMatchObject({ items: [{ resumeNote: 'wait for the queue', yieldedPauseAt: SUSPENDED_AT }] })
+		expect(harness.queue.yieldPausedRun('run-ghost')).toBe(false)
 	})
 })

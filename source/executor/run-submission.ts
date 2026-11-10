@@ -225,12 +225,19 @@ const PAUSED_RESUME_NOTE_PREFIX = 'The operator resumed this paused run. Message
 
 export type ResumeErroredOrSuspendedRunRejection = Extract<SuspendedRunResumeResult, { ok: false }>['error']
 
-export type ResumeErroredOrSuspendedRunResult = SuspendedRunResumeResult
+export type ResumeErroredOrSuspendedRunResult =
+	| { ok: true; runId: string; queued?: true }
+	| Extract<SuspendedRunResumeResult, { ok: false }>
 
 export interface ResumeErroredOrSuspendedRunQueue {
 	reactivateErrorItem(runId: string): void
 	reactivateSuspendedItem(runId: string): void
 	discardSuspendedRun(runId: string, reason?: string): void
+	// The operator-yield decision: true when runnable queued work sits ahead of the paused run in the run order.
+	hasRunnableWorkAheadOfRun(runId: string): boolean
+	// Marks the paused run's suspended item yielded so the scheduler runs waiting work first and resumes the run when it reaches the head.
+	yieldPausedRun(runId: string, note?: string): boolean
+	tick(): Promise<void>
 }
 
 export interface ResumeErroredOrSuspendedRunDependencies {
@@ -287,6 +294,20 @@ function resumeFromCheckpoint(dependencies: ResumeErroredOrSuspendedRunDependenc
 		const priorPause = meta.pause ?? checkpoint.pause
 		// An operator pause is not a provider recovery and must never be resumed by the automatic coordinator.
 		if (mode === 'automatic' && priorPause !== undefined) return { ok: false, error: 'run_not_resumable' }
+		// A pre-write operator pause yields to runnable queued work: keeping the run suspended and marking its item yielded lets the scheduler dispatch the work ahead before resuming the same run. Once the binding is already cleared (the run was yielded earlier), an explicit resume wakes it immediately.
+		if (
+			mode === 'operator'
+			&& boundSuspendedRun
+			&& dependencies.runSubmission.pausedRunKind() === 'operator'
+			&& priorPause !== undefined
+			&& checkpoint.writeCapableStarted !== true
+			&& dependencies.taskQueue.hasRunnableWorkAheadOfRun(runId)
+			&& dependencies.taskQueue.yieldPausedRun(runId, note)
+		) {
+			dependencies.runSubmission.clearPausedRun(runId)
+			void dependencies.taskQueue.tick()
+			return { ok: true, runId: checkpoint.runId, queued: true }
+		}
 		const start = dependencies.runSubmission.resume(checkpoint, {
 			explicitResume: true,
 			// The operator's explicit action starts a fresh incident. The automatic retry carries the prior suspension so a novel incident keeps its deadline and attempt count.
@@ -313,7 +334,57 @@ export function createResumeSuspendedRunAutomatically(dependencies: ResumeErrore
 	return (runId) => resumeFromCheckpoint(dependencies, runId, undefined, 'automatic')
 }
 
+export type ResumeYieldedRun = (runId: string, note?: string) => ResumeErroredOrSuspendedRunResult
+
+export interface ResumeYieldedRunDependencies {
+	runSubmission: RunSubmission
+	readRunMetaById: ReadRunMetaById
+	readCheckpointById: ReadRunCheckpointById
+	deletePauseRequest: DeletePauseRequest
+}
+
+// The scheduler's same-run resume of a yielded operator pause: the queue item stays out of the active slot (the scheduler already wrote its yielded active marker), so this validates the run and re-enters it under its own id without re-activating or settling the item. A rejection is the same value shape the explicit resume returns, letting the scheduler distinguish a transient slot conflict from an unresumable checkpoint.
+export function createResumeYieldedRun(dependencies: ResumeYieldedRunDependencies): ResumeYieldedRun {
+	return (runId, note) => {
+		if (dependencies.runSubmission.activeRunId() !== undefined) return { ok: false, error: 'run_in_progress' }
+		const metaText = dependencies.readRunMetaById(runId)
+		if (metaText === null) return { ok: false, error: 'run_not_found' }
+		const parsedMeta = safeJsonParse(metaText)
+		const meta = parsedMeta.ok && isRunMeta(parsedMeta.value) ? parsedMeta.value : null
+		if (meta === null) return { ok: false, error: 'run_not_found' }
+		if (meta.status !== 'suspended' || meta.pause === undefined) return { ok: false, error: 'run_not_resumable' }
+		const checkpointText = dependencies.readCheckpointById(runId)
+		if (checkpointText === null) return { ok: false, error: 'checkpoint_missing' }
+		const parsedCheckpoint = safeJsonParse(checkpointText)
+		const checkpoint = parsedCheckpoint.ok && isRunCheckpoint(parsedCheckpoint.value) ? parsedCheckpoint.value : null
+		if (checkpoint === null || checkpoint.runId !== runId) return { ok: false, error: 'checkpoint_missing' }
+		if (checkpoint.parkedAsk !== undefined) return { ok: false, error: 'checkpoint_missing' }
+		if (!dependencies.deletePauseRequest(runId)) return { ok: false, error: 'pause_intent_clear_failed' }
+		const start = dependencies.runSubmission.resume(checkpoint, {
+			explicitResume: true,
+			freshIncident: true,
+			...(note !== undefined ? { resumeNote: `${PAUSED_RESUME_NOTE_PREFIX}${note}` } : {}),
+		})
+		if (!start.ok) return start
+		return { ok: true, runId }
+	}
+}
+
 export type ReadPauseStateById = (runId: string) => PauseState | null
+
+export type ReadWriteCapableStartedById = (runId: string) => boolean | null
+
+// Reads whether a run's checkpoint says a write-capable role has started: false is pre-write, true is post-write, and null means the checkpoint is missing, corrupt, or names another run (the state is unknown).
+export function createReadWriteCapableStartedById(readCheckpointById: ReadRunCheckpointById): ReadWriteCapableStartedById {
+	return (runId) => {
+		const checkpointText = readCheckpointById(runId)
+		if (checkpointText === null) return null
+		const parsed = safeJsonParse(checkpointText)
+		if (!parsed.ok || !isRunCheckpoint(parsed.value)) return null
+		if (parsed.value.runId !== runId) return null
+		return parsed.value.writeCapableStarted === true
+	}
+}
 
 // Reads the pause a run's checkpoint carries: a parked ask (whose tool result the answer replaces) or a direct clarification finish (whose answer arrives as a note). A missing, corrupt, or misnamed checkpoint reads as absent.
 export function createReadPauseStateById(readCheckpointById: ReadRunCheckpointById): ReadPauseStateById {

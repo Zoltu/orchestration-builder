@@ -274,6 +274,9 @@ async function runAutomaticResume(runId: string, nextFailure: Extract<LlmCallRes
 			reactivateErrorItem: () => {},
 			reactivateSuspendedItem: () => {},
 			discardSuspendedRun: () => {},
+			hasRunnableWorkAheadOfRun: () => false,
+			yieldPausedRun: () => false,
+			tick: async () => {},
 		},
 	})
 	const coordinator = createProviderAutoResumeCoordinator({

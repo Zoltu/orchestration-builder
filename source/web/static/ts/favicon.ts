@@ -20,11 +20,13 @@ const FAVICON_COLORS: Record<string, string> = {
 // One filled upward triangle centered in a 16×16 viewBox; the fill color is the only thing that varies between states. The `{color}` placeholder is substituted by faviconHref.
 const FAVICON_SVG_TEMPLATE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M8 2l6 11H2Z" fill="{color}"/></svg>'
 
-// A polled entry only has to admit a `status` field to be weighed: the run-list and queue bodies are external data read one field deep, and any summary entry that cannot prove a terminal status counts as in progress while a queue entry with status needs_input means the operator is needed.
+// A polled entry only has to admit a `status` field to be weighed: the run-list and queue bodies are external data read a few fields deep, and any summary entry that cannot prove a terminal status counts as in progress while a queue entry with status needs_input means the operator is needed. A yielded pause also needs its runId so its suspended summary can be excluded from the global pause signal.
 interface StatusCarrier {
 	status: unknown
+	runId?: unknown
 	suspension?: unknown
 	pause?: unknown
+	yielded?: unknown
 }
 
 function admitsStatus(value: unknown): value is StatusCarrier {
@@ -42,11 +44,21 @@ function suspendedResumePolicy(value: StatusCarrier, nowMs: number): string {
 //
 // The summary entries arrive as the server returned them and are read for `status` and, when suspended, the suspension's effective policy: an entry whose status is not a known terminal status counts as in progress, while a non-object entry is ignored — a favicon must never tell the operator everything is done while a run might be active. A non-array argument is treated as no data at all; the app's actions normalize every poll to an array, so this only guards a refactor, and a favicon glitch must never take the UI down regardless.
 //
-// `summaries` are the polled run-list summaries (`GET /api/runs`), read for each entry's `status` and suspension fields; `pendingQuestions` are the polled pending questions (`GET /api/questions`), read only for their count; `queueItems` are the polled task-queue items (`GET /api/queue`), read only for the needs_input status a parked run carries. A parked needs_input run's question is not in `/api/questions`, so the queue is the only signal that the operator is needed.
+// `summaries` are the polled run-list summaries (`GET /api/runs`), read for each entry's `status` and suspension fields; `pendingQuestions` are the polled pending questions (`GET /api/questions`), read only for their count; `queueItems` are the polled task-queue items (`GET /api/queue`), read only for the needs_input status a parked run carries and for a non-yielded suspended item, since a yielded pause is waiting its turn rather than holding up the system. A parked needs_input run's question is not in `/api/questions`, so the queue is the only signal that the operator is needed.
 export function deriveFaviconState(summaries: unknown[] | undefined, pendingQuestions: unknown[] | undefined, queueItems: unknown[] | undefined, nowMs: number): FaviconState {
 	if (Array.isArray(pendingQuestions) && pendingQuestions.length > 0) return 'pending-input'
 	if (Array.isArray(queueItems) && queueItems.some((item) => admitsStatus(item) && item.status === 'needs_input')) return 'pending-input'
-	const queueHasSuspended = Array.isArray(queueItems) && queueItems.some((item) => admitsStatus(item) && item.status === 'suspended')
+	const queueHasSuspended = Array.isArray(queueItems) && queueItems.some((item) => admitsStatus(item) && item.status === 'suspended' && item.yielded !== true)
+	// A yielded pause is queued behind runnable work, so its suspended summary is not a global pause. Skipping its run id prevents the operator-pause policy from turning the icon yellow while the queued work is what the system is actually doing.
+	const yieldedRunIds = new Set<string>()
+	if (Array.isArray(queueItems)) {
+		for (const item of queueItems) {
+			if (!admitsStatus(item)) continue
+			if (item.status !== 'suspended' || item.yielded !== true) continue
+			if (typeof item.runId !== 'string' || item.runId === '') continue
+			yieldedRunIds.add(item.runId)
+		}
+	}
 	if (!Array.isArray(summaries)) return queueHasSuspended ? 'pending-input' : 'complete'
 	let working = false
 	let waitingSuspended = false
@@ -55,6 +67,7 @@ export function deriveFaviconState(summaries: unknown[] | undefined, pendingQues
 		if (!admitsStatus(summary)) continue
 		const { status } = summary
 		if (status === 'suspended') {
+			if (typeof summary.runId === 'string' && yieldedRunIds.has(summary.runId)) continue
 			if (suspendedResumePolicy(summary, nowMs) === 'auto') waitingSuspended = true
 			else operatorSuspended = true
 			continue
